@@ -22,7 +22,7 @@ export async function up(knex: Knex): Promise<void> {
       t.string("sessionKeyId", 16).notNullable();
 
       t.bigInteger("lastESeq").nullable();
-      t.integer("lastEObjectIndex").nullable();
+      t.bigInteger("lastEObjectIndex").nullable();
       t.binary("eChainHead").nullable();
       t.bigInteger("finalSeq").nullable();
       t.string("endReason", 64).nullable();
@@ -41,7 +41,7 @@ export async function up(knex: Knex): Promise<void> {
       t.foreign("sessionId").references("id").inTable(TableName.PamSession).onDelete("CASCADE");
 
       t.string("series", 1).notNullable(); // E or V
-      t.integer("objectIndex").notNullable();
+      t.bigInteger("objectIndex").notNullable();
       t.string("kind", 16).notNullable(); // events, init, media
       t.string("objectKey", 1024).notNullable();
       t.string("versionId", 1024).nullable();
