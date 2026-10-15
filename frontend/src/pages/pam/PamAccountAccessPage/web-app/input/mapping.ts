@@ -2,7 +2,7 @@ import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT } from "@app/lib/pam-web-app/con
 
 import { contentBox, type TRect } from "./geometry";
 
-export const WHEEL_LINE_PX = 40;
+const WHEEL_LINE_PX = 40;
 
 const clamp = (value: number, max: number) => Math.min(Math.max(value, 0), max);
 
