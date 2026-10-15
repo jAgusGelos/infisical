@@ -186,7 +186,10 @@ export type TPamWebAppStorage = {
 };
 
 type TPamWebAppCheckpointServiceFactoryDep = {
-  pamSessionDAL: { findById: (id: string) => Promise<TWebAppSession | undefined> };
+  pamSessionDAL: {
+    findById: (id: string) => Promise<TWebAppSession | undefined>;
+    endSessionById?: (id: string) => Promise<TWebAppSession | undefined>;
+  };
   pamWebAppSessionKeyDAL: Pick<
     TPamWebAppSessionKeyDALFactory,
     "findBySessionId" | "findBySessionIdForUpdate" | "findGatewayPin" | "create" | "update" | "transaction"
@@ -904,6 +907,13 @@ export const pamWebAppCheckpointServiceFactory = ({
         tx
       );
     });
+
+    // The recording end marker is also the gateway's authoritative signal that
+    // the PAM session is over. Persist it on pam_sessions so the normal session
+    // list and access checks do not leave a completed Web App session active.
+    // Keep endReason on the recording key (the session table has no reason
+    // column), while endedAt/status are recorded by the session DAL.
+    await pamSessionDAL.endSessionById?.(session.id);
     await signManifestIfComplete(session);
     return { ok: true as const };
   };
