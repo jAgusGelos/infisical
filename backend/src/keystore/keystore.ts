@@ -49,6 +49,8 @@ export const PgSqlLock = {
 
 // all the key prefixes used must be set here to avoid conflict
 export const KeyStorePrefixes = {
+  PamWebAccessReconnect: (userId: string, accountId: string) =>
+    `pam-web-access-reconnect:${userId}:${accountId}` as const,
   SecretReplication: "secret-replication-import-lock",
   FolderTreeCheckpoint: (envId: string) => `folder-tree-checkpoint-${envId}`,
 

@@ -79,7 +79,7 @@ export const sendWebAppSessionEndAndClose = (socket: TControlSocket, reason: Ses
 
 export const sendWebAppErrorAndClose = (
   socket: TControlSocket,
-  code: Extract<TControlErrorCode, "tunnel_failed" | "internal">,
+  code: Extract<TControlErrorCode, "tunnel_failed" | "internal" | "session_in_use">,
   message: string
 ) => {
   sendControl(socket, { kind: "error", code, message, fatal: true }, WS_CLOSE_INTERNAL_ERROR);
