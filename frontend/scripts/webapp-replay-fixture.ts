@@ -1,7 +1,7 @@
 // DEV-only fixture for the Web App replay page (open a session with ?replayFixture=<variant>).
 // Usage: npx tsx scripts/webapp-replay-fixture.ts
 // Writes public/dev-fixtures/webapp-replay/<variant>/ (git-excluded, never committed). Needs ffmpeg with libx264.
-// Signatures are real: the recording and session keys come from the F0 test vector seeds.
+// Signatures are real: the recording and session keys come from the contract test-vector seeds.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,6 +24,7 @@ import {
   hexToBytes,
   keyCommitment,
   Series,
+  seriesLetter,
   sha256,
   uuidToBytes
 } from "../src/lib/pam-web-app/contract";
@@ -39,8 +40,13 @@ const SESSION_AES_KEY = hexToBytes("11".repeat(32));
 const OPEN_WALL_MS = 1760544000000n;
 const PTS_ZERO_MONO_US = 1_250_000;
 const SEGMENT_US = 10_000_000;
+const SEGMENT_SECONDS = SEGMENT_US / 1_000_000;
 const SEGMENTS = 3;
-const MIME = 'video/mp4; codecs="avc1.64001f"';
+const FRAMES_PER_SEGMENT = 300;
+const VIDEO_CODEC = "avc1.64001f";
+const MIME = `video/mp4; codecs="${VIDEO_CODEC}"`;
+const CHUNK_SPLIT_MONO_US = 15_000_000;
+const SESSION_END_MONO_US = 31_500_000;
 
 const encodeVideo = () => {
   const dir = mkdtempSync(join(tmpdir(), "webapp-replay-"));
@@ -56,7 +62,7 @@ const encodeVideo = () => {
       "-i",
       "testsrc2=size=1280x720:rate=30",
       "-t",
-      String((SEGMENTS * SEGMENT_US) / 1_000_000),
+      String(SEGMENTS * SEGMENT_SECONDS),
       "-c:v",
       "libx264",
       "-profile:v",
@@ -74,15 +80,15 @@ const encodeVideo = () => {
       "-threads",
       "1",
       "-g",
-      "300",
+      String(FRAMES_PER_SEGMENT),
       "-keyint_min",
-      "300",
+      String(FRAMES_PER_SEGMENT),
       "-sc_threshold",
       "0",
       "-f",
       "hls",
       "-hls_time",
-      "10",
+      String(SEGMENT_SECONDS),
       "-hls_segment_type",
       "fmp4",
       "-hls_playlist_type",
@@ -268,76 +274,157 @@ const encrypt = async (series: Series, objectIndex: number, plaintext: Uint8Arra
 
 type TVariant = { name: string; withLoss?: boolean; active?: boolean };
 
-const build = async (video: { init: Uint8Array; segments: Uint8Array[] }, variant: TVariant) => {
+type TVideo = { init: Uint8Array; segments: Uint8Array[] };
+
+const videoEventSpecs = (video: TVideo, vHashes: Uint8Array[]): TEventSpec[] => [
+  {
+    type: EventType.VInit,
+    monoUs: 1_000_000,
+    body: {
+      objectIndex: 0,
+      sha256: bytesToHex(vHashes[0]),
+      bytes: video.init.length,
+      codec: VIDEO_CODEC,
+      width: 1280,
+      height: 720,
+      timescale: 90000
+    }
+  },
+  ...video.segments.map((seg, i) => ({
+    type: EventType.VSegment,
+    monoUs: PTS_ZERO_MONO_US + (i + 1) * SEGMENT_US,
+    body: {
+      objectIndex: i + 1,
+      initIndex: 0,
+      segmentIndex: i + 1,
+      sha256: bytesToHex(vHashes[i + 1]),
+      bytes: seg.length,
+      startPtsUs: i * SEGMENT_US,
+      endPtsUs: (i + 1) * SEGMENT_US,
+      monoStartUs: PTS_ZERO_MONO_US + i * SEGMENT_US,
+      monoEndUs: PTS_ZERO_MONO_US + (i + 1) * SEGMENT_US,
+      firstFrame: i * FRAMES_PER_SEGMENT,
+      frameCount: FRAMES_PER_SEGMENT,
+      framesDropped: 0
+    }
+  }))
+];
+
+const sessionOpenSpec = (): TEventSpec => ({
+  type: EventType.SessionOpen,
+  monoUs: 0,
+  body: {
+    sessionId: SESSION_ID,
+    projectId: PROJECT_ID,
+    resourceType: "web-app",
+    startUrl: "https://grafana.corp.internal/",
+    allowedHosts: ["grafana.corp.internal"],
+    recordingKey: {
+      keyId: keys.recordingKeyId,
+      fingerprint: keys.recordingFingerprint,
+      publicKey: bytesToBase64(hexToBytes(keys.recordingPublicKeyHex))
+    },
+    sessionKeyCert: bytesToBase64(hexToBytes(keys.keyCertHex)),
+    sessionKeyCertSig: bytesToBase64(hexToBytes(keys.keyCertSigHex)),
+    maskingPolicyVersion: 1,
+    liveCodec: null,
+    startedAt: new Date(Number(OPEN_WALL_MS)).toISOString()
+  }
+});
+
+const createObjectSigner = async (write: (rel: string, data: Uint8Array) => void) => {
   const sessionSigner = await ed25519SigningKeyFromSeed(hexToBytes(keys.sessionSeedHex));
   const sessionPublicKey = hexToBytes(keys.sessionPublicKeyHex);
   const sessionIdBytes = uuidToBytes(SESSION_ID);
   const commitment = await keyCommitment(SESSION_AES_KEY);
+  return async (
+    series: Series,
+    kind: CheckpointKind,
+    objectIndex: number,
+    seqRange: [number, number],
+    chainHead: Uint8Array,
+    plaintext: Uint8Array
+  ) => {
+    const stored = await encrypt(series, objectIndex, plaintext);
+    const cp = await buildCheckpoint({
+      series,
+      kind,
+      sessionIdBytes,
+      objectIndex,
+      firstSeq: BigInt(seqRange[0]),
+      lastSeq: BigInt(seqRange[1]),
+      chainHead,
+      plaintextSha256: await sha256(plaintext),
+      ciphertextSha256: await sha256(stored),
+      plaintextBytes: BigInt(plaintext.length),
+      ciphertextBytes: BigInt(stored.length),
+      keyCommitment: commitment,
+      signerPublicKey: sessionPublicKey,
+      createdAtUnixMs: OPEN_WALL_MS + 40_000n
+    });
+    const letter = seriesLetter(series);
+    write(`objects/${letter}/${objectIndex}`, plaintext);
+    write(`stored/${letter}/${objectIndex}`, stored);
+    return {
+      objectIndex,
+      checkpoint: bytesToBase64(cp),
+      signature: bytesToBase64(await signCheckpoint(sessionSigner, cp)),
+      objectKey: `web-app/${PROJECT_ID}/${SESSION_ID}/${letter}/${String(objectIndex).padStart(8, "0")}`,
+      versionId: `v-${letter}-${objectIndex}`,
+      binding: "bound" as const
+    };
+  };
+};
 
+const mediaEntryFields = (objectIndex: number) => {
+  const startUs = (objectIndex - 1) * SEGMENT_US;
+  return {
+    kind: "media",
+    initIndex: 0,
+    startMs: startUs / 1000,
+    endMs: (startUs + SEGMENT_US) / 1000,
+    monoStartUs: PTS_ZERO_MONO_US + startUs,
+    monoEndUs: PTS_ZERO_MONO_US + startUs + SEGMENT_US,
+    frameCount: FRAMES_PER_SEGMENT,
+    framesDropped: 0
+  };
+};
+
+const replayDocument = (variant: TVariant, videoEntries: unknown[], chunks: unknown[]) => ({
+  sessionId: SESSION_ID,
+  projectId: PROJECT_ID,
+  status: variant.active ? "active" : "ended",
+  startedAt: new Date(Number(OPEN_WALL_MS)).toISOString(),
+  endedAt: variant.active ? null : new Date(Number(OPEN_WALL_MS) + SESSION_END_MONO_US / 1000).toISOString(),
+  endReason: variant.active ? null : "user_end",
+  recordingKey: {
+    publicKey: bytesToBase64(hexToBytes(keys.recordingPublicKeyHex)),
+    keyId: keys.recordingKeyId,
+    fingerprint: keys.recordingFingerprint
+  },
+  keyCert: bytesToBase64(hexToBytes(keys.keyCertHex)),
+  keyCertSig: bytesToBase64(hexToBytes(keys.keyCertSigHex)),
+  storage: { objectLock: true, mode: "COMPLIANCE", retainUntil: "2026-10-15T00:00:00Z" },
+  video: { mime: MIME, objects: videoEntries },
+  events: { chunks },
+  manifest: null
+});
+
+const isVideoSpecFor = (objectIndex: number) => (s: TEventSpec) =>
+  (s.type === EventType.VInit || s.type === EventType.VSegment) &&
+  (s.body as { objectIndex: number }).objectIndex === objectIndex;
+
+const build = async (video: TVideo, variant: TVariant) => {
   const vObjects = [video.init, ...video.segments];
   const vHashes = await Promise.all(vObjects.map((o) => sha256(o)));
-
-  const specs: TEventSpec[] = [
-    {
-      type: EventType.VInit,
-      monoUs: 1_000_000,
-      body: {
-        objectIndex: 0,
-        sha256: bytesToHex(vHashes[0]),
-        bytes: video.init.length,
-        codec: "avc1.64001f",
-        width: 1280,
-        height: 720,
-        timescale: 90000
-      }
-    },
-    ...video.segments.map((seg, i) => ({
-      type: EventType.VSegment,
-      monoUs: PTS_ZERO_MONO_US + (i + 1) * SEGMENT_US,
-      body: {
-        objectIndex: i + 1,
-        initIndex: 0,
-        segmentIndex: i + 1,
-        sha256: bytesToHex(vHashes[i + 1]),
-        bytes: seg.length,
-        startPtsUs: i * SEGMENT_US,
-        endPtsUs: (i + 1) * SEGMENT_US,
-        monoStartUs: PTS_ZERO_MONO_US + i * SEGMENT_US,
-        monoEndUs: PTS_ZERO_MONO_US + (i + 1) * SEGMENT_US,
-        firstFrame: i * 300,
-        frameCount: 300,
-        framesDropped: 0
-      }
-    })),
-    ...traffic(Boolean(variant.withLoss))
-  ].sort((a, b) => a.monoUs - b.monoUs);
-
-  const sessionOpen: TEventSpec = {
-    type: EventType.SessionOpen,
-    monoUs: 0,
-    body: {
-      sessionId: SESSION_ID,
-      projectId: PROJECT_ID,
-      resourceType: "web-app",
-      startUrl: "https://grafana.corp.internal/",
-      allowedHosts: ["grafana.corp.internal"],
-      recordingKey: {
-        keyId: keys.recordingKeyId,
-        fingerprint: keys.recordingFingerprint,
-        publicKey: bytesToBase64(hexToBytes(keys.recordingPublicKeyHex))
-      },
-      sessionKeyCert: bytesToBase64(hexToBytes(keys.keyCertHex)),
-      sessionKeyCertSig: bytesToBase64(hexToBytes(keys.keyCertSigHex)),
-      maskingPolicyVersion: 1,
-      liveCodec: null,
-      startedAt: new Date(Number(OPEN_WALL_MS)).toISOString()
-    }
-  };
-  const all = [sessionOpen, ...specs];
+  const specs = [...videoEventSpecs(video, vHashes), ...traffic(Boolean(variant.withLoss))].sort(
+    (a, b) => a.monoUs - b.monoUs
+  );
+  const all = [sessionOpenSpec(), ...specs];
   if (!variant.active) {
     all.push({
       type: EventType.SessionEnd,
-      monoUs: 31_500_000,
+      monoUs: SESSION_END_MONO_US,
       body: { reason: "user_end", finalSeq: all.length, vObjects: vObjects.length, eChunks: 2 }
     });
   }
@@ -350,11 +437,6 @@ const build = async (video: { init: Uint8Array; segments: Uint8Array[] }, varian
     }))
   );
 
-  const split = all.findIndex((s) => s.monoUs >= 15_000_000);
-  const chunkRanges = [
-    [0, split - 1],
-    [split, all.length - 1]
-  ];
   const outDir = join(outRoot, variant.name);
   rmSync(outDir, { recursive: true, force: true });
   const write = (rel: string, data: Uint8Array | string) => {
@@ -362,102 +444,33 @@ const build = async (video: { init: Uint8Array; segments: Uint8Array[] }, varian
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, data);
   };
+  const signObject = await createObjectSigner(write);
 
-  const signObject = async (
-    series: Series,
-    kind: CheckpointKind,
-    objectIndex: number,
-    firstSeq: number,
-    lastSeq: number,
-    chainHead: Uint8Array,
-    plaintext: Uint8Array
-  ) => {
-    const stored = await encrypt(series, objectIndex, plaintext);
-    const cp = await buildCheckpoint({
-      series,
-      kind,
-      sessionIdBytes,
-      objectIndex,
-      firstSeq: BigInt(firstSeq),
-      lastSeq: BigInt(lastSeq),
-      chainHead,
-      plaintextSha256: await sha256(plaintext),
-      ciphertextSha256: await sha256(stored),
-      plaintextBytes: BigInt(plaintext.length),
-      ciphertextBytes: BigInt(stored.length),
-      keyCommitment: commitment,
-      signerPublicKey: sessionPublicKey,
-      createdAtUnixMs: OPEN_WALL_MS + 40_000n
-    });
-    const letter = series === Series.V ? "V" : "E";
-    write(`objects/${letter}/${objectIndex}`, plaintext);
-    write(`stored/${letter}/${objectIndex}`, stored);
-    return {
-      objectIndex,
-      checkpoint: bytesToBase64(cp),
-      signature: bytesToBase64(await signCheckpoint(sessionSigner, cp)),
-      objectKey: `web-app/${PROJECT_ID}/${SESSION_ID}/${letter}/${String(objectIndex).padStart(8, "0")}`,
-      versionId: `v-${letter}-${objectIndex}`,
-      binding: "bound" as const
-    };
-  };
-
+  const split = all.findIndex((s) => s.monoUs >= CHUNK_SPLIT_MONO_US);
+  const chunkRanges: [number, number][] = [
+    [0, split - 1],
+    [split, all.length - 1]
+  ];
   const chunks = [];
   for (let i = 0; i < chunkRanges.length; i += 1) {
     const [first, last] = chunkRanges[i];
     if (variant.active && i === chunkRanges.length - 1) break;
     const plaintext = concatBytes(...envelopes.slice(first, last + 1));
     // eslint-disable-next-line no-await-in-loop
-    const signed = await signObject(Series.E, CheckpointKind.Events, i, first, last, hashes[last], plaintext);
+    const signed = await signObject(Series.E, CheckpointKind.Events, i, [first, last], hashes[last], plaintext);
     chunks.push({ ...signed, firstSeq: first, lastSeq: last });
   }
 
   const videoEntries = [];
   for (let i = 0; i < vObjects.length; i += 1) {
-    const seq = all.findIndex(
-      (s) => (s.type === EventType.VInit || s.type === EventType.VSegment) && (s.body as { objectIndex: number }).objectIndex === i
-    );
+    const seq = all.findIndex(isVideoSpecFor(i));
     const kind = i === 0 ? CheckpointKind.VideoInit : CheckpointKind.VideoMedia;
     // eslint-disable-next-line no-await-in-loop
-    const signed = await signObject(Series.V, kind, i, seq, seq, hashes[seq], vObjects[i]);
-    if (i === 0) {
-      videoEntries.push({ ...signed, kind: "init" });
-    } else {
-      const startUs = (i - 1) * SEGMENT_US;
-      videoEntries.push({
-        ...signed,
-        kind: "media",
-        initIndex: 0,
-        startMs: startUs / 1000,
-        endMs: (startUs + SEGMENT_US) / 1000,
-        monoStartUs: PTS_ZERO_MONO_US + startUs,
-        monoEndUs: PTS_ZERO_MONO_US + startUs + SEGMENT_US,
-        frameCount: 300,
-        framesDropped: 0
-      });
-    }
+    const signed = await signObject(Series.V, kind, i, [seq, seq], hashes[seq], vObjects[i]);
+    videoEntries.push(i === 0 ? { ...signed, kind: "init" } : { ...signed, ...mediaEntryFields(i) });
   }
 
-  const replay = {
-    sessionId: SESSION_ID,
-    projectId: PROJECT_ID,
-    status: variant.active ? "active" : "ended",
-    startedAt: new Date(Number(OPEN_WALL_MS)).toISOString(),
-    endedAt: variant.active ? null : new Date(Number(OPEN_WALL_MS) + 31_500).toISOString(),
-    endReason: variant.active ? null : "user_end",
-    recordingKey: {
-      publicKey: bytesToBase64(hexToBytes(keys.recordingPublicKeyHex)),
-      keyId: keys.recordingKeyId,
-      fingerprint: keys.recordingFingerprint
-    },
-    keyCert: bytesToBase64(hexToBytes(keys.keyCertHex)),
-    keyCertSig: bytesToBase64(hexToBytes(keys.keyCertSigHex)),
-    storage: { objectLock: true, mode: "COMPLIANCE", retainUntil: "2026-10-15T00:00:00Z" },
-    video: { mime: MIME, objects: videoEntries },
-    events: { chunks },
-    manifest: null
-  };
-  write("replay.json", JSON.stringify(replay, null, 2));
+  write("replay.json", JSON.stringify(replayDocument(variant, videoEntries, chunks), null, 2));
   write("session-key.b64", `${bytesToBase64(SESSION_AES_KEY)}\n`);
   return outDir;
 };
