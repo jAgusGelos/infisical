@@ -563,16 +563,15 @@ export const pamWebAppCheckpointServiceFactory = ({
         try {
           const storage = await getObjectStorage(session);
           const sessionKey = await getSessionKey(session);
-          const lossFlags = await Promise.all(
-            objects
-              .filter((object) => object.series === PamWebAppSeries.E)
-              .map(async (object) => {
-                const plaintext = await readPlaintext(session, storage, sessionKey, rowRef(object));
-                return parseEnvelopes(plaintext).some(
-                  (envelope) => envelope.type === EventType.Loss || envelope.type === EventType.ContinuityUnknown
-                );
-              })
-          );
+          const hasLoss = await objects
+            .filter((object) => object.series === PamWebAppSeries.E)
+            .reduce(async (lossFound, object) => {
+              if (await lossFound) return true;
+              const plaintext = await readPlaintext(session, storage, sessionKey, rowRef(object));
+              return parseEnvelopes(plaintext).some(
+                (envelope) => envelope.type === EventType.Loss || envelope.type === EventType.ContinuityUnknown
+              );
+            }, Promise.resolve(false));
 
           await pamWebAppManifestService.signManifest({
             sessionId: session.id,
@@ -591,7 +590,7 @@ export const pamWebAppCheckpointServiceFactory = ({
               binding: object.binding,
               checkpoint: object.checkpoint
             })),
-            hasLoss: lossFlags.some(Boolean)
+            hasLoss
           });
         } catch (err) {
           logger.error(
@@ -866,22 +865,28 @@ export const pamWebAppCheckpointServiceFactory = ({
     const session = await getGatewaySession(request, actor);
     const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
     if (!keys) throw new PamWebAppError(PamWebAppErrorCode.UnknownKey, "Open the Web App recording before ending it");
-    if (keys.finalSeq !== null && keys.finalSeq !== undefined && Number(keys.finalSeq) !== request.finalSeq) {
-      throw new PamWebAppError(
-        PamWebAppErrorCode.Conflict,
-        `Recording already ended at finalSeq ${keys.finalSeq}; cannot change it to ${request.finalSeq}`
+    await pamWebAppSessionKeyDAL.transaction(async (tx) => {
+      const locked = await pamWebAppSessionKeyDAL.findBySessionIdForUpdate(session.id, tx);
+      if (!locked)
+        throw new PamWebAppError(PamWebAppErrorCode.UnknownKey, "The Web App recording of this session is gone");
+      if (locked.finalSeq !== null && locked.finalSeq !== undefined && Number(locked.finalSeq) !== request.finalSeq) {
+        throw new PamWebAppError(
+          PamWebAppErrorCode.Conflict,
+          `Recording already ended at finalSeq ${locked.finalSeq}; cannot change it to ${request.finalSeq}`
+        );
+      }
+      if (locked.lastESeq !== null && locked.lastESeq !== undefined && Number(locked.lastESeq) !== request.finalSeq) {
+        throw new PamWebAppError(
+          PamWebAppErrorCode.Conflict,
+          `finalSeq ${request.finalSeq} does not match the last accepted event sequence ${locked.lastESeq}`
+        );
+      }
+      await pamWebAppSessionKeyDAL.update(
+        { sessionId: session.id },
+        { finalSeq: request.finalSeq, endReason: request.reason.trim() || null },
+        tx
       );
-    }
-    if (keys.lastESeq !== null && keys.lastESeq !== undefined && Number(keys.lastESeq) !== request.finalSeq) {
-      throw new PamWebAppError(
-        PamWebAppErrorCode.Conflict,
-        `finalSeq ${request.finalSeq} does not match the last accepted event sequence ${keys.lastESeq}`
-      );
-    }
-    await pamWebAppSessionKeyDAL.update(
-      { sessionId: session.id },
-      { finalSeq: request.finalSeq, endReason: request.reason.trim() || null }
-    );
+    });
     await signManifestIfComplete(session);
     return { ok: true as const };
   };
