@@ -37,12 +37,11 @@ export const shortcutFor = (
   }
 };
 
-export const useReplayShortcuts = (handlers: TReplayShortcutHandlers, enabled: boolean) => {
+export const useReplayShortcuts = (handlers: TReplayShortcutHandlers) => {
   const ref = useRef(handlers);
   ref.current = handlers;
 
   useEffect(() => {
-    if (!enabled) return undefined;
     const onKeyDown = (e: KeyboardEvent) => {
       const action = shortcutFor(e);
       if (!action) return;
@@ -57,7 +56,7 @@ export const useReplayShortcuts = (handlers: TReplayShortcutHandlers, enabled: b
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [enabled]);
+  }, []);
 };
 
 // Nearest item strictly before or after the playhead (with a small margin so repeated presses move on).
