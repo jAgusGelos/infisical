@@ -235,7 +235,7 @@ export type TInputEvent =
       action: "down" | "up";
       code: string;
       key: string;
-      mods: number;
+      mods?: number;
       repeat?: boolean;
       ts?: number;
     }
@@ -246,10 +246,10 @@ export type TInputEvent =
       button: number;
       x: number;
       y: number;
-      mods: number;
+      mods?: number;
       ts?: number;
     }
-  | { t: "wheel"; dx: number; dy: number; x: number; y: number; mods: number; ts?: number }
+  | { t: "wheel"; dx: number; dy: number; x: number; y: number; mods?: number; ts?: number }
   | { t: "ime"; text: string; ts?: number }
   | { t: "paste"; id: string; part: number; total: number; text: string; ts?: number };
 
