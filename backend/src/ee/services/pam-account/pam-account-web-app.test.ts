@@ -171,7 +171,7 @@ describe("web-app template settings", () => {
     });
   });
 
-  test("requires recording and S3 storage when Object Lock is required", () => {
+  test("requires recording and S3 storage for Web App recordings", () => {
     expect(() =>
       PamTemplateSettingsInputSchema.parse({
         recordingEnabled: false,
@@ -187,7 +187,7 @@ describe("web-app template settings", () => {
         recordingStorageBackend: PamRecordingStorageBackend.Postgres,
         webApp: { requireObjectLock: false }
       })
-    ).not.toThrow();
+    ).toThrow(/Object Lock/);
   });
 
   test("accepts an S3-compatible endpoint with path-style addressing", () => {
