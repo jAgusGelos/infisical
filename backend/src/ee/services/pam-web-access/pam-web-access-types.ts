@@ -1,3 +1,5 @@
+import type { Socket } from "node:net";
+
 import type WebSocket from "ws";
 import { z } from "zod";
 
@@ -45,6 +47,8 @@ export type TEarlyBufferedMsg = { data: Buffer; isBinary: boolean };
 
 export type TSessionContext = {
   socket: WebSocket;
+  // The upgrade request's socket under `socket`, paused for upstream backpressure (Web App sessions).
+  rawSocket?: Socket;
   relayPort: number;
   resourceName: string;
   sessionId: string;
