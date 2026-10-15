@@ -1032,24 +1032,63 @@ export const ACCOUNT_TYPE_CONFIGS = {
     name: "Web App",
     icon: "WebApp.png",
     connectionDetails: WebAppConnectionDetailsSchema,
-    credentials: z.discriminatedUnion("authMethod", [
-      z.object({ authMethod: z.literal(PamWebAppAuthMethod.None) }),
-      z.object({
-        authMethod: z.literal(PamWebAppAuthMethod.Header),
-        headerScheme: z.nativeEnum(PamWebAppHeaderScheme),
-        username: z.string().trim().max(256).optional(),
-        password: z.string().max(1024).optional(),
-        token: z.string().max(8192).optional(),
-        headerName: z.string().trim().max(256).optional(),
-        headerValue: z.string().max(8192).optional()
+    credentials: z
+      .discriminatedUnion("authMethod", [
+        z.object({ authMethod: z.literal(PamWebAppAuthMethod.None) }),
+        z.object({
+          authMethod: z.literal(PamWebAppAuthMethod.Header),
+          headerScheme: z.nativeEnum(PamWebAppHeaderScheme),
+          username: z.string().trim().max(256).optional(),
+          password: z.string().max(1024).optional(),
+          token: z.string().max(8192).optional(),
+          headerName: z.string().trim().max(256).optional(),
+          headerValue: z.string().max(8192).optional()
+        }),
+        z.object({
+          authMethod: z.literal(PamWebAppAuthMethod.FormLogin),
+          username: z.string().trim().min(1).max(256),
+          password: z.string().min(1).max(1024),
+          recipe: WebAppFormLoginRecipeSchema
+        })
+      ])
+      .superRefine((credentials, ctx) => {
+        if (credentials.authMethod !== PamWebAppAuthMethod.Header) return;
+        if (credentials.headerScheme === PamWebAppHeaderScheme.Basic) {
+          if (!credentials.username)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["username"],
+              message: "Username is required for Basic authentication"
+            });
+          if (!credentials.password)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["password"],
+              message: "Password is required for Basic authentication"
+            });
+        }
+        if (credentials.headerScheme === PamWebAppHeaderScheme.Bearer && !credentials.token) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["token"],
+            message: "Token is required for Bearer authentication"
+          });
+        }
+        if (credentials.headerScheme === PamWebAppHeaderScheme.Custom) {
+          if (!credentials.headerName)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["headerName"],
+              message: "Header name is required for custom authentication"
+            });
+          if (!credentials.headerValue)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["headerValue"],
+              message: "Header value is required for custom authentication"
+            });
+        }
       }),
-      z.object({
-        authMethod: z.literal(PamWebAppAuthMethod.FormLogin),
-        username: z.string().trim().min(1).max(256),
-        password: z.string().min(1).max(1024),
-        recipe: WebAppFormLoginRecipeSchema
-      })
-    ]),
     sanitizedCredentials: z.object({
       authMethod: z.nativeEnum(PamWebAppAuthMethod),
       headerScheme: z.nativeEnum(PamWebAppHeaderScheme).optional(),
