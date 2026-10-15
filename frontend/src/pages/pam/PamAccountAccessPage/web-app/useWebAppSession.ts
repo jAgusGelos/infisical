@@ -7,16 +7,17 @@ import { LIVE_CODEC_PROBES, type TInputEvent } from "@app/lib/pam-web-app/contra
 import { createCanvasPainter } from "./decode/canvasPainter";
 import { LiveDecoder } from "./decode/LiveDecoder";
 import { browserClock, initialViewerState, type TViewerState } from "./session/types";
-import { WebAppSessionClient } from "./session/WebAppSessionClient";
+import { WebAppSessionClient, WS_NORMAL_CLOSURE } from "./session/WebAppSessionClient";
+import { ERROR_COPY } from "./copy";
 import { getDevMockWsUrl } from "./devMock";
+import { toSameOriginWsUrl } from "./socketUrl";
 
 const CLIENT_NAME = "infisical-web/1.0";
 
-export const buildWebAppSocketUrl = (accountId: string, ticket: string) => {
-  const { protocol, host } = window.location;
-  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-  return `${wsProtocol}//${host}/api/v1/pam/accounts/${accountId}/web-access?ticket=${encodeURIComponent(ticket)}`;
-};
+const buildWebAppSocketUrl = (accountId: string, ticket: string) =>
+  toSameOriginWsUrl(
+    `/api/v1/pam/accounts/${accountId}/web-access?ticket=${encodeURIComponent(ticket)}`
+  );
 
 const isSupported = async (codec: string) => {
   if (typeof VideoDecoder === "undefined") return false;
@@ -28,13 +29,12 @@ const isSupported = async (codec: string) => {
   }
 };
 
-const ticketErrorMessage = (err: unknown) => {
-  if (axios.isAxiosError(err)) {
-    const apiMessage = (err.response?.data as { message?: string } | undefined)?.message;
-    if (apiMessage) return apiMessage;
+const connectErrorMessage = (err: unknown) => {
+  if (axios.isAxiosError<{ message?: string }>(err) && err.response?.data?.message) {
+    return err.response.data.message;
   }
   if (err instanceof Error && err.message) return err.message;
-  return "Unable to start the session.";
+  return ERROR_COPY.client_error;
 };
 
 type Options = {
@@ -60,7 +60,7 @@ export const useWebAppSession = ({ accountId, reason, mfaSessionId }: Options) =
       socket.onmessage = null;
       socket.onclose = null;
       if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
-        socket.close(1000, "viewer closed");
+        socket.close(WS_NORMAL_CLOSURE, "viewer closed");
       }
     }
   }, []);
@@ -78,7 +78,7 @@ export const useWebAppSession = ({ accountId, reason, mfaSessionId }: Options) =
     const h264 = await isSupported(LIVE_CODEC_PROBES.h264);
     if (!isCurrent()) return;
     if (!h264) {
-      fail("This browser cannot decode the session stream.", "no_decoder");
+      fail(ERROR_COPY.no_decoder, "no_decoder");
       return;
     }
 
@@ -91,14 +91,20 @@ export const useWebAppSession = ({ accountId, reason, mfaSessionId }: Options) =
         );
         url = buildWebAppSocketUrl(accountId, data.ticket);
       } catch (err) {
-        if (isCurrent()) fail(ticketErrorMessage(err));
+        if (isCurrent()) fail(connectErrorMessage(err));
         return;
       }
     }
     if (!isCurrent() || !canvasRef.current) return;
 
     const paint = createCanvasPainter(canvasRef.current);
-    const socket = new WebSocket(url);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(url);
+    } catch (err) {
+      fail(connectErrorMessage(err));
+      return;
+    }
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
 
@@ -118,7 +124,7 @@ export const useWebAppSession = ({ accountId, reason, mfaSessionId }: Options) =
       hello: {
         protocol: 1,
         client: CLIENT_NAME,
-        // VP9 is probed and advertised once the fallback path exists; VS1 is H.264 only.
+        // Not advertised until the viewer has a VP9 fallback path, even where the browser could decode it.
         decoders: { vp9: false, h264 },
         viewport: {
           width: Math.round(window.innerWidth),
