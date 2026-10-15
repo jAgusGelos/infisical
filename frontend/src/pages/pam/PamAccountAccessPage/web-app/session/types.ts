@@ -7,14 +7,14 @@ import type {
 
 export type TClock = {
   now: () => number;
-  setTimeout: (fn: () => void, ms: number) => unknown;
-  clearTimeout: (handle: unknown) => void;
+  setTimeout: (fn: () => void, ms: number) => number;
+  clearTimeout: (handle: number) => void;
 };
 
 export const browserClock: TClock = {
   now: () => performance.now(),
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-  clearTimeout: (handle) => window.clearTimeout(handle as number)
+  clearTimeout: (handle) => window.clearTimeout(handle)
 };
 
 export type TSessionSocket = {
