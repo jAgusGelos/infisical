@@ -56,6 +56,7 @@ export const InputLog = ({ rows, playheadMs, autoFollow, onSeek }: Props) => {
               )}
               <span className="min-w-0 flex-1 truncate font-mono">{row.text}</span>
               {row.kind === "credential" && <Badge variant="info">credential injected</Badge>}
+              {row.masked && <Badge variant="info">Secret Field</Badge>}
               {row.droppedCount > 0 && <Badge variant="warning">{row.droppedCount} blocked</Badge>}
             </button>
           );
