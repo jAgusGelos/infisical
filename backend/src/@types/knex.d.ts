@@ -829,6 +829,16 @@ import {
 } from "@app/db/schemas/pam-session-event-chunks";
 import { TPamSessions, TPamSessionsInsert, TPamSessionsUpdate } from "@app/db/schemas/pam-sessions";
 import {
+  TPamWebAppObjects,
+  TPamWebAppObjectsInsert,
+  TPamWebAppObjectsUpdate
+} from "@app/db/schemas/pam-web-app-objects";
+import {
+  TPamWebAppSessionKeys,
+  TPamWebAppSessionKeysInsert,
+  TPamWebAppSessionKeysUpdate
+} from "@app/db/schemas/pam-web-app-session-keys";
+import {
   TProjectMicrosoftTeamsConfigs,
   TProjectMicrosoftTeamsConfigsInsert,
   TProjectMicrosoftTeamsConfigsUpdate
@@ -1874,6 +1884,16 @@ declare module "knex/types/tables" {
       TPamSessionEventChunks,
       TPamSessionEventChunksInsert,
       TPamSessionEventChunksUpdate
+    >;
+    [TableName.PamWebAppSessionKey]: KnexOriginal.CompositeTableType<
+      TPamWebAppSessionKeys,
+      TPamWebAppSessionKeysInsert,
+      TPamWebAppSessionKeysUpdate
+    >;
+    [TableName.PamWebAppObject]: KnexOriginal.CompositeTableType<
+      TPamWebAppObjects,
+      TPamWebAppObjectsInsert,
+      TPamWebAppObjectsUpdate
     >;
     [TableName.PamProjectRecordingConfig]: KnexOriginal.CompositeTableType<
       TPamProjectRecordingConfigs,
