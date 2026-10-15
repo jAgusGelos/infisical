@@ -5,13 +5,10 @@ import { TVerifiedVideoObject } from "@app/hooks/api/pam/web-app-replay";
 import { isMseTypeSupported, startMsePlayback } from "./msePlayer";
 
 export type TMseVideoPlayerHandle = {
-  play: () => Promise<void>;
-  pause: () => void;
   toggle: () => void;
   // ms on the video timeline, 0 = first buffered frame
   seek: (videoMs: number) => void;
   setRate: (rate: number) => void;
-  getCurrentTimeMs: () => number;
 };
 
 type Props = {
@@ -34,10 +31,6 @@ export const MseVideoPlayer = forwardRef<TMseVideoPlayerHandle, Props>(
     useImperativeHandle(
       ref,
       () => ({
-        play: async () => {
-          await videoRef.current?.play();
-        },
-        pause: () => videoRef.current?.pause(),
         toggle: () => {
           const v = videoRef.current;
           if (!v) return;
@@ -51,9 +44,7 @@ export const MseVideoPlayer = forwardRef<TMseVideoPlayerHandle, Props>(
         },
         setRate: (rate: number) => {
           if (videoRef.current) videoRef.current.playbackRate = rate;
-        },
-        getCurrentTimeMs: () =>
-          videoRef.current ? (videoRef.current.currentTime - originRef.current) * 1000 : 0
+        }
       }),
       []
     );

@@ -1,5 +1,8 @@
 import { TVerifiedVideoObject } from "@app/hooks/api/pam/web-app-replay";
 
+const NEXT_RANGE_EPSILON_S = 0.01;
+const RANGE_END_MARGIN_S = 0.1;
+
 export type TSourceBufferLike = Pick<
   SourceBuffer,
   "appendBuffer" | "addEventListener" | "removeEventListener" | "updating"
@@ -68,9 +71,16 @@ export const appendVerifiedObjects = async (
 
 export const nextBufferedStart = (buffered: TimeRanges, time: number) => {
   for (let i = 0; i < buffered.length; i += 1) {
-    if (buffered.start(i) > time + 0.01) return buffered.start(i);
+    if (buffered.start(i) > time + NEXT_RANGE_EPSILON_S) return buffered.start(i);
   }
   return null;
+};
+
+const isInBufferedRange = (buffered: TimeRanges, time: number) => {
+  for (let i = 0; i < buffered.length; i += 1) {
+    if (buffered.start(i) <= time && time < buffered.end(i) - RANGE_END_MARGIN_S) return true;
+  }
+  return false;
 };
 
 export const isMseTypeSupported = (mime: string) =>
@@ -100,12 +110,7 @@ export const startMsePlayback = ({
   const onWaiting = () => {
     // A missing or refused segment leaves a hole in the buffer; playback continues at the next range.
     const next = nextBufferedStart(video.buffered, video.currentTime);
-    const inRange = Array.from({ length: video.buffered.length }).some(
-      (_, i) =>
-        video.buffered.start(i) <= video.currentTime &&
-        video.currentTime < video.buffered.end(i) - 0.1
-    );
-    if (!inRange && next !== null) {
+    if (!isInBufferedRange(video.buffered, video.currentTime) && next !== null) {
       // eslint-disable-next-line no-param-reassign
       video.currentTime = next;
     }
