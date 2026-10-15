@@ -566,6 +566,7 @@ export const pamWebAccessServiceFactory = ({
       isWebAppWire = account.accountType === PamAccountType.WebApp;
 
       let reconnectSessionId: string | undefined;
+      let reconnectGatewayId: string | null | undefined;
       if (isWebAppWire) {
         const reconnectState = await readReconnectState(userId, accountId);
         const reconnectSession = reconnectState ? await pamSessionDAL.findById(reconnectState.sessionId) : undefined;
@@ -582,6 +583,7 @@ export const pamWebAccessServiceFactory = ({
         if (reconnectDecision === "reattach") {
           if (reconnectSession) {
             reconnectSessionId = reconnectSession.id;
+            reconnectGatewayId = reconnectSession.gatewayId;
           }
         } else if (reconnectState) {
           await clearReconnectState(userId, accountId);
@@ -630,10 +632,12 @@ export const pamWebAccessServiceFactory = ({
         }
       }
 
-      const effectiveGatewayId = await gatewayPoolService.resolveEffectiveGatewayId({
-        gatewayId: account.gatewayId ?? account.templateGatewayId,
-        gatewayPoolId: account.gatewayPoolId ?? account.templateGatewayPoolId
-      });
+      const effectiveGatewayId =
+        reconnectGatewayId ??
+        (await gatewayPoolService.resolveEffectiveGatewayId({
+          gatewayId: account.gatewayId ?? account.templateGatewayId,
+          gatewayPoolId: account.gatewayPoolId ?? account.templateGatewayPoolId
+        }));
       if (!effectiveGatewayId) {
         throw new BadRequestError({ message: "Gateway not configured for this account" });
       }
