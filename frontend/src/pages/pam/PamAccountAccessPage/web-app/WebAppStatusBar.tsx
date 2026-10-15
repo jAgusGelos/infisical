@@ -60,6 +60,14 @@ export const WebAppStatusBar = ({ state, reconnectStatus, accountName, onEndSess
         )}
       </span>
       <div className="flex items-center gap-4">
+        {isActive && state.degraded && (
+          <span
+            className="rounded-sm border border-warning px-1.5 text-warning"
+            title="The live view skipped frames to catch up. The recording is not affected."
+          >
+            Viewer degraded
+          </span>
+        )}
         {isActive && (
           <span className="flex items-center gap-1.5" title="This session is being recorded">
             <span className="inline-block size-2 animate-pulse rounded-full bg-danger" />

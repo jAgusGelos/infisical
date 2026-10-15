@@ -1,9 +1,18 @@
-import { type KeyboardEvent, type PointerEvent, useEffect, useRef } from "react";
+import {
+  type ClipboardEvent,
+  type CompositionEvent,
+  type KeyboardEvent,
+  type PointerEvent,
+  useEffect,
+  useRef
+} from "react";
 
+import { createNotification } from "@app/components/notifications";
 import { TPamAccount } from "@app/hooks/api/pam";
 
 import { InputBatcher } from "./input/InputBatcher";
-import { mapToFramebuffer, modsOf, normalizeWheel } from "./input/mapping";
+import { isPasteShortcut, mapToFramebuffer, modsOf, normalizeWheel } from "./input/mapping";
+import { buildImeEvent, buildPasteEvents, isPasteAllowed } from "./input/textInput";
 import { canSendInput } from "./session/controlReducer";
 import { useWebAppSession } from "./useWebAppSession";
 import { WebAppOverlays } from "./WebAppOverlays";
@@ -114,6 +123,8 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
 
   const handleKey = (event: KeyboardEvent<HTMLTextAreaElement>, action: "down" | "up") => {
     if (event.nativeEvent.isComposing || event.keyCode === IME_PROCESS_KEY_CODE) return;
+    // The browser must see the shortcut to fire `paste`; the text goes up as a paste event, not as keys.
+    if (isPasteShortcut(event)) return;
     if (!canSendInput(stateRef.current)) return;
     event.preventDefault();
     batcher.push({
@@ -125,6 +136,36 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
       repeat: event.repeat,
       ts: performance.now()
     });
+  };
+
+  const clearSink = () => {
+    if (sinkRef.current) sinkRef.current.value = "";
+  };
+
+  const handleCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
+    clearSink();
+    if (!canSendInput(stateRef.current)) return;
+    const ime = buildImeEvent(event.data, performance.now());
+    if (ime) batcher.push(ime);
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    event.preventDefault();
+    if (!canSendInput(stateRef.current)) return;
+    if (!isPasteAllowed(stateRef.current.policy)) {
+      createNotification({ type: "info", text: "Paste is disabled by policy for this session." });
+      return;
+    }
+    const events = buildPasteEvents(
+      event.clipboardData.getData("text/plain"),
+      crypto.randomUUID(),
+      performance.now()
+    );
+    if (events === "too_large") {
+      createNotification({ type: "error", text: "Pasted text is larger than 1 MiB." });
+      return;
+    }
+    events.forEach((paste) => batcher.push(paste));
   };
 
   return (
@@ -152,10 +193,18 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
           tabIndex={-1}
           onKeyDown={(event) => handleKey(event, "down")}
           onKeyUp={(event) => handleKey(event, "up")}
-          onChange={() => {
-            if (sinkRef.current) sinkRef.current.value = "";
+          onCompositionEnd={handleCompositionEnd}
+          onPaste={handlePaste}
+          onChange={(event) => {
+            // Clearing the value mid-composition cancels the IME, so wait for compositionend.
+            if (!(event.nativeEvent as InputEvent).isComposing) clearSink();
           }}
         />
+        {state.recordingLoss && (
+          <div className="absolute top-2 left-1/2 z-20 -translate-x-1/2 rounded-md border border-warning bg-card px-3 py-1 text-xs text-warning">
+            The recorder reported a gap in this session&apos;s recording.
+          </div>
+        )}
         <WebAppOverlays state={state} reconnectStatus={reconnectStatus} onReconnect={reconnect} />
       </div>
       <WebAppStatusBar

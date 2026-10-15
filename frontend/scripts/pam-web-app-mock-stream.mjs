@@ -14,8 +14,8 @@
 // access units split on AUDs and keyframe recovery is quick. With `--codec vp9` it also encodes VP9 (IVF) and
 // streams it to viewers whose HELLO advertises vp9, like the gateway's live codec choice. Upstream frames are
 // logged. Commands on stdin:
-//   hide | hide-policy | show | input-off | input-on | degraded | recovered | recloss | epoch | corrupt | end |
-//   error | drop
+//   hide | hide-policy | show | input-off | input-on | degraded | recovered | recloss | epoch | corrupt |
+//   clipboard-on | end | error | drop
 //
 // The 20-byte header is encoded here because Node cannot import the TypeScript contract module directly; the
 // encoder is checked against the contract test vectors at startup.
@@ -297,6 +297,15 @@ const serve = (streams) => {
     links.add(link);
     console.log("viewer connected");
 
+    link.sendSessionReady = (clipboard) =>
+      link.control({
+        kind: "session_ready",
+        sessionId,
+        expiresAt: link.expiresAt,
+        inputEnabled: true,
+        policy: { clipboard, downloads: "block", uploads: "block" }
+      });
+
     link.sendVideoConfig = () => {
       const config = { codec: link.stream.codec, width: WIDTH, height: HEIGHT, framerate: FPS, epoch: link.epoch };
       if (link.stream === streams.h264) config.format = "annexb";
@@ -311,13 +320,8 @@ const serve = (streams) => {
         return;
       }
       const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000).toISOString();
-      link.control({
-        kind: "session_ready",
-        sessionId,
-        expiresAt,
-        inputEnabled: true,
-        policy: { clipboard: "off", downloads: "block", uploads: "block" }
-      });
+      link.expiresAt = expiresAt;
+      link.sendSessionReady("off");
       link.control({ kind: "time_left", secondsLeft: SESSION_SECONDS, expiresAt });
       link.sendVideoConfig();
       console.log(`sent session_ready, time_left, VIDEO_CONFIG ${link.stream.codec}`);
@@ -417,6 +421,8 @@ const serve = (streams) => {
       l.sendVideoConfig();
       l.jumpToKeyframe();
     },
+    // session_ready is sent again after a reattach (contract 1.11); here it carries a policy that allows paste.
+    "clipboard-on": (l) => l.sendSessionReady("to_remote"),
     // Until the link closes, every frame is a keyframe of random bytes: a stream the probe accepted but the
     // decoder cannot decode (the viewer falls back from VP9 to H.264).
     corrupt: (l) => {
