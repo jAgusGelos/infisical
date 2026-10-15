@@ -263,4 +263,40 @@ describe("WebAppSessionClient", () => {
     expect(client.requestKeyframe()).toBe(true);
     expect(socket.sent.filter((f) => f.type === FrameType.KeyframeRequest)).toHaveLength(2);
   });
+
+  it("requests a keyframe when VIDEO_CONFIG changes epoch, not on the first config", () => {
+    const { client, socket, clock } = setup();
+    client.start();
+    const keyframeRequests = () =>
+      socket.sent.filter((f) => f.type === FrameType.KeyframeRequest).length;
+    client.handleMessage(downstream(FrameType.VideoConfig, encodeJsonPayload(videoConfig)));
+    expect(keyframeRequests()).toBe(0);
+    clock.advance(KEYFRAME_REQUEST_INTERVAL_MS);
+    client.handleMessage(
+      downstream(FrameType.VideoConfig, encodeJsonPayload({ ...videoConfig, epoch: 2 }))
+    );
+    expect(keyframeRequests()).toBe(1);
+    expect(client.getState().videoConfig?.epoch).toBe(2);
+  });
+
+  it("stamps time_left with the monotonic clock", () => {
+    const { client, clock } = setup();
+    client.start();
+    clock.advance(1234);
+    client.handleMessage(controlFrame({ kind: "time_left", secondsLeft: 90, expiresAt: "x" }));
+    expect(client.getState()).toMatchObject({ secondsLeft: 90, timeLeftAt: 1234 });
+  });
+
+  it("abort fails the link once and closes the socket", () => {
+    const { client, socket } = setup();
+    client.start();
+    client.abort({ code: "client_error", message: "decode failed" });
+    expect(client.getState()).toMatchObject({
+      phase: "failed",
+      error: { message: "decode failed" }
+    });
+    expect(socket.closed).toBe(1000);
+    client.abort({ code: "client_error", message: "second" });
+    expect(client.getState().error?.message).toBe("decode failed");
+  });
 });

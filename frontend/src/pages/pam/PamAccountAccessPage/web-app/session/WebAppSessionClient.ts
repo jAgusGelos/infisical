@@ -172,19 +172,27 @@ export class WebAppSessionClient {
   }
 
   private handleVideoConfig(config: TVideoConfig) {
+    const previous = this.state.videoConfig;
     this.options.decoder.configure(config);
     this.setState({ ...this.state, videoConfig: config });
+    if (previous && previous.epoch !== config.epoch) this.requestKeyframe();
   }
 
   private handleControl(control: TControlDown) {
-    const next = controlReducer(this.state, control);
-    if (next === this.state) return;
+    const reduced = controlReducer(this.state, control);
+    if (reduced === this.state) return;
+    const next =
+      control.kind === "time_left" ? { ...reduced, timeLeftAt: this.options.clock.now() } : reduced;
     if (control.kind === "stream_shown") this.requestKeyframe();
     this.setState(next);
     if (next.phase === "ended" || next.phase === "failed") {
       this.acks.stop();
       this.clearEndTimer();
     }
+  }
+
+  abort(error: TViewerError) {
+    if (!this.isTerminal()) this.fail(error);
   }
 
   private fail(error: TViewerError) {

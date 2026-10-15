@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { TVideoConfig } from "@app/lib/pam-web-app/contract";
 
-import { LiveDecoder, MAX_DECODE_QUEUE, type TDecoderFactory } from "./LiveDecoder";
+import {
+  LiveDecoder,
+  MAX_CONSECUTIVE_DECODER_ERRORS,
+  MAX_DECODE_QUEUE,
+  type TDecoderFactory
+} from "./LiveDecoder";
 
 const config: TVideoConfig = {
   codec: "avc1.64001F",
@@ -66,7 +71,12 @@ const chunk = (seq: number, keyframe: boolean) => ({
 describe("LiveDecoder", () => {
   it("configures with the exact codec string and drops chunks until a keyframe", () => {
     const { factory, instances } = createFactory();
-    const decoder = new LiveDecoder({ onFrame: vi.fn(), onNeedKeyframe: vi.fn(), factory });
+    const decoder = new LiveDecoder({
+      onFrame: vi.fn(),
+      onNeedKeyframe: vi.fn(),
+      onFatalError: vi.fn(),
+      factory
+    });
 
     expect(decoder.decode(chunk(0, true))).toBe(false);
     decoder.configure(config);
@@ -85,7 +95,12 @@ describe("LiveDecoder", () => {
 
   it("waits for a keyframe again after a reconfigure (epoch change)", () => {
     const { factory, instances } = createFactory();
-    const decoder = new LiveDecoder({ onFrame: vi.fn(), onNeedKeyframe: vi.fn(), factory });
+    const decoder = new LiveDecoder({
+      onFrame: vi.fn(),
+      onNeedKeyframe: vi.fn(),
+      onFatalError: vi.fn(),
+      factory
+    });
     decoder.configure(config);
     decoder.decode(chunk(0, true));
     decoder.configure({ ...config, epoch: 2, width: 1920, height: 1080 });
@@ -97,7 +112,12 @@ describe("LiveDecoder", () => {
   it("drops deltas and asks for a keyframe when the decode queue overflows", () => {
     const { factory, instances } = createFactory();
     const onNeedKeyframe = vi.fn();
-    const decoder = new LiveDecoder({ onFrame: vi.fn(), onNeedKeyframe, factory });
+    const decoder = new LiveDecoder({
+      onFrame: vi.fn(),
+      onNeedKeyframe,
+      onFatalError: vi.fn(),
+      factory
+    });
     decoder.configure(config);
     decoder.decode(chunk(0, true));
     instances[0].decodeQueueSize = MAX_DECODE_QUEUE + 1;
@@ -111,7 +131,12 @@ describe("LiveDecoder", () => {
   it("recovers from a decoder error with a new configured decoder and a keyframe request", () => {
     const { factory, instances } = createFactory();
     const onNeedKeyframe = vi.fn();
-    const decoder = new LiveDecoder({ onFrame: vi.fn(), onNeedKeyframe, factory });
+    const decoder = new LiveDecoder({
+      onFrame: vi.fn(),
+      onNeedKeyframe,
+      onFatalError: vi.fn(),
+      factory
+    });
     decoder.configure(config);
     decoder.decode(chunk(0, true));
     instances[0].init.error(new DOMException("decode failed"));
@@ -126,7 +151,12 @@ describe("LiveDecoder", () => {
   it("forwards frames to the painter and closes frames after close()", () => {
     const { factory, instances } = createFactory();
     const onFrame = vi.fn();
-    const decoder = new LiveDecoder({ onFrame, onNeedKeyframe: vi.fn(), factory });
+    const decoder = new LiveDecoder({
+      onFrame,
+      onNeedKeyframe: vi.fn(),
+      onFatalError: vi.fn(),
+      factory
+    });
     decoder.configure(config);
     const frame = { close: vi.fn() } as unknown as VideoFrame;
     instances[0].init.output(frame);
@@ -136,5 +166,40 @@ describe("LiveDecoder", () => {
     instances[0].init.output(late);
     expect(late.close).toHaveBeenCalled();
     expect(decoder.decode(chunk(5, true))).toBe(false);
+  });
+
+  it("reports a fatal codec error after repeated failures without a frame", () => {
+    const { factory, instances } = createFactory();
+    const onFatalError = vi.fn();
+    const decoder = new LiveDecoder({
+      onFrame: vi.fn(),
+      onNeedKeyframe: vi.fn(),
+      onFatalError,
+      factory
+    });
+    decoder.configure({ ...config, codec: "vp09.00.31.08" });
+    for (let i = 0; i < MAX_CONSECUTIVE_DECODER_ERRORS; i += 1) {
+      instances[instances.length - 1].init.error(new DOMException("unsupported"));
+    }
+    expect(onFatalError).toHaveBeenCalledWith("vp09.00.31.08");
+    expect(decoder.decode(chunk(1, true))).toBe(false);
+  });
+
+  it("resets the error count once a frame is decoded", () => {
+    const { factory, instances } = createFactory();
+    const onFatalError = vi.fn();
+    const decoder = new LiveDecoder({
+      onFrame: vi.fn(),
+      onNeedKeyframe: vi.fn(),
+      onFatalError,
+      factory
+    });
+    decoder.configure(config);
+    for (let i = 0; i < MAX_CONSECUTIVE_DECODER_ERRORS * 2; i += 1) {
+      const current = instances[instances.length - 1];
+      current.init.error(new DOMException("glitch"));
+      instances[instances.length - 1].init.output({ close: vi.fn() } as unknown as VideoFrame);
+    }
+    expect(onFatalError).not.toHaveBeenCalled();
   });
 });

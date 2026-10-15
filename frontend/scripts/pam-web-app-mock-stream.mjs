@@ -2,7 +2,7 @@
 // Dev-only mock of the gateway side of the Web App viewer link (CONTRACTS.md section 1), so the viewer can be driven
 // without the backend, gateway and runner.
 //
-//   node scripts/pam-web-app-mock-stream.mjs [--port 7104] [--input <video file>] [--self-check]
+//   node scripts/pam-web-app-mock-stream.mjs [--port 7104] [--input <video file>] [--codec vp9] [--self-check]
 //
 // The app CSP only allows same-origin WebSockets, so proxy a path of the dev server to the mock, for example in a
 // local (uncommitted) vite config: server.proxy["/pam-web-app-mock"] = { target: "ws://127.0.0.1:7104", ws: true }.
@@ -11,14 +11,17 @@
 // and open any PAM account's access page. Remove the key to go back to the real flow.
 //
 // The video is re-encoded once with ffmpeg into H.264 Annex B (keyint 30, AUD NALs, SPS/PPS before every IDR), so
-// access units split on AUDs and keyframe recovery is quick. Upstream frames are logged. Commands on stdin:
-//   hide | show | input-off | input-on | degraded | recovered | recloss | end | error | drop
+// access units split on AUDs and keyframe recovery is quick. With `--codec vp9` it also encodes VP9 (IVF) and
+// streams it to viewers whose HELLO advertises vp9, like the gateway's live codec choice. Upstream frames are
+// logged. Commands on stdin:
+//   hide | hide-policy | show | input-off | input-on | degraded | recovered | recloss | epoch | corrupt | end |
+//   error | drop
 //
 // The 20-byte header is encoded here because Node cannot import the TypeScript contract module directly; the
 // encoder is checked against the contract test vectors at startup.
 
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,6 +42,7 @@ const { values: args } = parseArgs({
   options: {
     port: { type: "string", default: "7104" },
     input: { type: "string" },
+    codec: { type: "string", default: "h264" },
     "self-check": { type: "boolean", default: false }
   }
 });
@@ -146,9 +150,31 @@ const splitAccessUnits = (data) => {
   };
 };
 
-const generateStream = () => {
+const SOURCE_FILTER =
+  "color=c=red:s=32x32[b];[0:v][b]overlay=x='mod(n*12,1240)':y=8:shortest=1,fps=30,format=yuv420p";
+
+const H264_ARGS = [
+  "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1", "-preset", "veryfast", "-tune", "zerolatency",
+  "-x264-params", "keyint=30:min-keyint=30:scenecut=0:repeat-headers=1:aud=1",
+  "-bsf:v", "h264_mp4toannexb", "-f", "h264"
+];
+
+// No alt-ref or lag, so every IVF frame is one displayable frame (no superframes).
+const VP9_ARGS = [
+  "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-g", "30",
+  "-keyint_min", "30", "-lag-in-frames", "0", "-auto-alt-ref", "0", "-b:v", "1500k", "-f", "ivf"
+];
+
+const VP9_CODEC = "vp09.00.31.08";
+const CORRUPT_FRAME_BYTES = 2048;
+const IVF_FILE_HEADER = 32;
+const IVF_FRAME_HEADER = 12;
+const VP9_SHOW_EXISTING_FRAME = 0x08;
+const VP9_NON_KEY_FRAME = 0x04;
+
+const encode = (codecArgs) => {
   const dir = mkdtempSync(join(tmpdir(), "pam-web-app-mock-"));
-  const out = join(dir, "live.h264");
+  const out = join(dir, "live.bin");
   const input = args.input ?? DEFAULT_INPUT;
   const source = existsSync(input)
     ? ["-i", input]
@@ -156,26 +182,47 @@ const generateStream = () => {
   // The moving square guarantees visible change even when the recording is mostly static.
   const result = spawnSync(
     "ffmpeg",
-    [
-      "-v", "error", "-y", ...source, "-an",
-      "-filter_complex", "color=c=red:s=32x32[b];[0:v][b]overlay=x='mod(n*12,1240)':y=8:shortest=1,fps=30,format=yuv420p",
-      "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1", "-preset", "veryfast", "-tune", "zerolatency",
-      "-x264-params", "keyint=30:min-keyint=30:scenecut=0:repeat-headers=1:aud=1",
-      "-bsf:v", "h264_mp4toannexb", "-f", "h264", out
-    ],
+    ["-v", "error", "-y", ...source, "-an", "-filter_complex", SOURCE_FILTER, ...codecArgs, out],
     { stdio: ["ignore", "inherit", "inherit"] }
   );
   if (result.status !== 0) throw new Error(`ffmpeg failed with status ${result.status}`);
   const data = readFileSync(out);
   rmSync(dir, { recursive: true, force: true });
-  const stream = splitAccessUnits(data);
+  return { data, source: existsSync(input) ? input : "testsrc2" };
+};
+
+const splitIvfFrames = (data) => {
+  const units = [];
+  for (let off = IVF_FILE_HEADER; off + IVF_FRAME_HEADER <= data.length; ) {
+    const size = data.readUInt32LE(off);
+    const frame = data.subarray(off + IVF_FRAME_HEADER, off + IVF_FRAME_HEADER + size);
+    units.push({
+      keyframe: (frame[0] & (VP9_SHOW_EXISTING_FRAME | VP9_NON_KEY_FRAME)) === 0,
+      data: frame
+    });
+    off += IVF_FRAME_HEADER + size;
+  }
+  return { codec: VP9_CODEC, units };
+};
+
+const checkStream = (name, stream, source) => {
   if (!stream.codec || stream.units.length === 0 || !stream.units[0].keyframe) {
-    throw new Error("generated stream has no SPS or does not start with a keyframe");
+    throw new Error(`generated ${name} stream has no codec string or does not start with a keyframe`);
   }
   console.log(
-    `stream ready: ${stream.units.length} access units, ${stream.units.filter((u) => u.keyframe).length} keyframes, codec ${stream.codec}, source ${existsSync(input) ? input : "testsrc2"}`
+    `${name} stream ready: ${stream.units.length} frames, ${stream.units.filter((u) => u.keyframe).length} keyframes, codec ${stream.codec}, source ${source}`
   );
   return stream;
+};
+
+const generateStreams = () => {
+  const h264 = encode(H264_ARGS);
+  const streams = { h264: checkStream("h264", splitAccessUnits(h264.data), h264.source) };
+  if (args.codec === "vp9") {
+    const vp9 = encode(VP9_ARGS);
+    streams.vp9 = checkStream("vp9", splitIvfFrames(vp9.data), vp9.source);
+  }
+  return streams;
 };
 
 const describeInputEvent = (e) => {
@@ -202,13 +249,32 @@ const describeUpstream = (frame) => {
   return `${name} seq=${frame.seq}`;
 };
 
-const serve = (stream) => {
+const pickStream = (streams, decoders) => {
+  if (streams.vp9 && decoders?.vp9) return streams.vp9;
+  if (decoders?.h264) return streams.h264;
+  return null;
+};
+
+const serve = (streams) => {
   const port = Number(args.port);
   const wss = new WebSocketServer({ host: "127.0.0.1", port });
   const links = new Set();
+  // One session per mock process, so a reconnect reattaches to the same sessionId (contract 1.11).
+  const sessionId = randomUUID();
 
   wss.on("connection", (ws) => {
-    const link = { ws, seq: 0, startedAt: Date.now(), hidden: false, auIndex: 0, timer: null, helloSeen: false };
+    const link = {
+      ws,
+      seq: 0,
+      startedAt: Date.now(),
+      hidden: false,
+      auIndex: 0,
+      timer: null,
+      helloSeen: false,
+      stream: null,
+      epoch: 1,
+      corrupt: false
+    };
     link.send = (type, payload, flags = 0, timestampUs = (Date.now() - link.startedAt) * 1000) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(encodeFrame(type, flags, link.seq, timestampUs, payload));
@@ -217,7 +283,8 @@ const serve = (stream) => {
     link.control = (body) => link.send(T.Control, Buffer.from(JSON.stringify(body)));
     link.jumpToKeyframe = () => {
       let i = link.auIndex;
-      while (!stream.units[i % stream.units.length].keyframe) i += 1;
+      const { units } = link.stream;
+      while (!units[i % units.length].keyframe) i += 1;
       link.auIndex = i;
     };
     let frameCount = 0;
@@ -230,26 +297,36 @@ const serve = (stream) => {
     links.add(link);
     console.log("viewer connected");
 
-    const startStream = () => {
+    link.sendVideoConfig = () => {
+      const config = { codec: link.stream.codec, width: WIDTH, height: HEIGHT, framerate: FPS, epoch: link.epoch };
+      if (link.stream === streams.h264) config.format = "annexb";
+      link.send(T.VideoConfig, Buffer.from(JSON.stringify(config)));
+    };
+
+    const startStream = (hello) => {
+      link.stream = pickStream(streams, hello.decoders);
+      if (!link.stream) {
+        link.control({ kind: "error", code: "no_decoder", message: "No common live codec", fatal: true });
+        ws.close(1000, "no_decoder");
+        return;
+      }
       const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000).toISOString();
       link.control({
         kind: "session_ready",
-        sessionId: randomUUID(),
+        sessionId,
         expiresAt,
         inputEnabled: true,
         policy: { clipboard: "off", downloads: "block", uploads: "block" }
       });
       link.control({ kind: "time_left", secondsLeft: SESSION_SECONDS, expiresAt });
-      link.send(
-        T.VideoConfig,
-        Buffer.from(
-          JSON.stringify({ codec: stream.codec, format: "annexb", width: WIDTH, height: HEIGHT, framerate: FPS, epoch: 1 })
-        )
-      );
-      console.log(`sent session_ready, time_left, VIDEO_CONFIG ${stream.codec}`);
+      link.sendVideoConfig();
+      console.log(`sent session_ready, time_left, VIDEO_CONFIG ${link.stream.codec}`);
       link.timer = setInterval(() => {
         if (link.hidden || ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
-        const unit = stream.units[link.auIndex % stream.units.length];
+        const { units } = link.stream;
+        const unit = link.corrupt
+          ? { keyframe: true, data: randomBytes(CORRUPT_FRAME_BYTES) }
+          : units[link.auIndex % units.length];
         link.send(T.VideoChunk, unit.data, unit.keyframe ? FLAG_KEYFRAME : 0, Math.round((frameCount * 1e6) / FPS));
         frameCount += 1;
         link.auIndex += 1;
@@ -288,7 +365,7 @@ const serve = (stream) => {
       console.log(describeUpstream(frame));
       if (frame.type === T.Hello) {
         link.helloSeen = true;
-        startStream();
+        startStream(JSON.parse(frame.payload.toString("utf8")));
       } else if (frame.type === T.KeyframeRequest) {
         link.jumpToKeyframe();
       } else if (frame.type === T.ControlUp) {
@@ -313,6 +390,10 @@ const serve = (stream) => {
       l.hidden = true;
       l.control({ kind: "stream_hidden", reason: "login" });
     },
+    "hide-policy": (l) => {
+      l.hidden = true;
+      l.control({ kind: "stream_hidden", reason: "policy" });
+    },
     show: (l) => {
       l.hidden = false;
       l.control({ kind: "stream_shown" });
@@ -331,6 +412,16 @@ const serve = (stream) => {
       l.control({ kind: "error", code: "runner_unavailable", message: "Mock runner failure", fatal: true });
       l.ws.close(1011, "error");
     },
+    epoch: (l) => {
+      l.epoch += 1;
+      l.sendVideoConfig();
+      l.jumpToKeyframe();
+    },
+    // Until the link closes, every frame is a keyframe of random bytes: a stream the probe accepted but the
+    // decoder cannot decode (the viewer falls back from VP9 to H.264).
+    corrupt: (l) => {
+      l.corrupt = true;
+    },
     drop: (l) => l.ws.terminate()
   };
   createInterface({ input: process.stdin }).on("line", (line) => {
@@ -347,4 +438,4 @@ const serve = (stream) => {
 };
 
 selfCheck();
-if (!args["self-check"]) serve(generateStream());
+if (!args["self-check"]) serve(generateStreams());

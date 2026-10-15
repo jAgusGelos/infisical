@@ -58,6 +58,8 @@ export type TViewerState = {
   inputEnabled: boolean;
   hidden: "login" | "policy" | null;
   secondsLeft?: number;
+  // TClock.now() when `secondsLeft` arrived, so the countdown does not depend on the wall clock.
+  timeLeftAt?: number;
   policy?: TSessionPolicy;
   videoConfig?: TVideoConfig;
   endReason?: TSessionEndReason;

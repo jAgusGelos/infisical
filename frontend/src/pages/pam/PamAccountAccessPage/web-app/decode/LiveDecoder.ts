@@ -4,6 +4,8 @@ import type { TLiveChunk, TLiveDecoderPort } from "../session/types";
 
 export const MAX_DECODE_QUEUE = 8;
 
+export const MAX_CONSECUTIVE_DECODER_ERRORS = 3;
+
 type TDecoderLike = Pick<
   VideoDecoder,
   "configure" | "decode" | "reset" | "close" | "decodeQueueSize" | "state"
@@ -22,6 +24,8 @@ const browserDecoderFactory: TDecoderFactory = {
 type Options = {
   onFrame: (frame: VideoFrame) => void;
   onNeedKeyframe: () => void;
+  // Called once when the decoder keeps failing without producing a frame, so the codec is unusable here.
+  onFatalError: (codec: string) => void;
   factory?: TDecoderFactory;
 };
 
@@ -41,6 +45,8 @@ export class LiveDecoder implements TLiveDecoderPort {
   private waitingForKeyframe = true;
 
   private closed = false;
+
+  private consecutiveErrors = 0;
 
   private readonly factory: TDecoderFactory;
 
@@ -97,6 +103,7 @@ export class LiveDecoder implements TLiveDecoderPort {
             frame.close();
             return;
           }
+          this.consecutiveErrors = 0;
           this.options.onFrame(frame);
         },
         error: () => this.recover()
@@ -110,6 +117,12 @@ export class LiveDecoder implements TLiveDecoderPort {
     if (this.closed) return;
     if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
     this.decoder = null;
+    this.consecutiveErrors += 1;
+    if (this.consecutiveErrors >= MAX_CONSECUTIVE_DECODER_ERRORS) {
+      this.closed = true;
+      this.options.onFatalError(this.config?.codec ?? "");
+      return;
+    }
     this.waitingForKeyframe = true;
     if (this.config) this.ensureDecoder().configure(toDecoderConfig(this.config));
     this.options.onNeedKeyframe();
