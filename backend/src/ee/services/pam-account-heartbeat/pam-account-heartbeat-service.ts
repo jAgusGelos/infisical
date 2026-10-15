@@ -139,6 +139,14 @@ export const pamAccountHeartbeatServiceFactory = ({
       return { status: PamHeartbeatStatus.Unknown, message: "No credential is stored for this account" };
     }
 
+    // Web App credentials are injected by the gateway's egress proxy; there is no login to probe.
+    if (accountType === PamAccountType.WebApp) {
+      return {
+        status: PamHeartbeatStatus.CannotCheck,
+        message: "Credential checks are not available for Web App accounts"
+      };
+    }
+
     const connectionDetails = validateConnectionDetails(
       accountType,
       await decrypt(projectId, account.encryptedConnectionDetails)

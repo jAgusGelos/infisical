@@ -439,6 +439,9 @@ export const buildGatewayConnectionTest = async (
     }
     case PamAccountType.Windows:
       return tcp(host, port);
+    // Reachability only until the gateway answers the Web App HTTP test (CONTRACTS 8.4).
+    case PamAccountType.WebApp:
+      return tcp(host, port);
     default:
       return null;
   }
