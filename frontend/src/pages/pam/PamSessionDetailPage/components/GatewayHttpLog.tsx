@@ -1,11 +1,13 @@
-import { useMemo, useState } from "react";
+import { ReactNode, useMemo, useState } from "react";
 import { BanIcon, ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 
 import { Badge, Button } from "@app/components/v3";
 import {
+  ACTION_LABEL,
   filterL1Rows,
   formatSessionTime,
   rowIndexAt,
+  THeaderList,
   TL1Filter,
   TL1Row
 } from "@app/hooks/api/pam/web-app-replay";
@@ -27,7 +29,7 @@ const statusVariant = (row: TL1Row) => {
   return "neutral" as const;
 };
 
-const HeaderTable = ({ headers }: { headers: [string, string][] }) =>
+const HeaderTable = ({ headers }: { headers: THeaderList }) =>
   headers.length ? (
     <dl className="grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] gap-x-3 gap-y-0.5 font-mono text-xs">
       {headers.map(([name, value], i) => (
@@ -42,36 +44,91 @@ const HeaderTable = ({ headers }: { headers: [string, string][] }) =>
     <p className="text-xs text-muted">No headers</p>
   );
 
+const DetailSection = ({ title, children }: { title: string; children: ReactNode }) => (
+  <section className="flex flex-col gap-1">
+    <h4 className="text-xs text-label">{title}</h4>
+    {children}
+  </section>
+);
+
+const BodySection = ({ title, body, bytes }: { title: string; body: string; bytes: number }) =>
+  body ? (
+    <DetailSection title={`${title} (${bytes} bytes)`}>
+      <pre className="max-h-40 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">
+        {body}
+      </pre>
+    </DetailSection>
+  ) : null;
+
 const RowDetail = ({ row }: { row: TL1Row }) => (
   <div className="flex flex-col gap-3 border-t border-border bg-container px-3 py-2">
     {row.blockedReason && <p className="text-xs">Reason: {row.blockedReason}</p>}
-    <section className="flex flex-col gap-1">
-      <h4 className="text-xs text-label">Request headers</h4>
+    <DetailSection title="Request headers">
       <HeaderTable headers={row.requestHeaders} />
-    </section>
-    {row.requestBody && (
-      <section className="flex flex-col gap-1">
-        <h4 className="text-xs text-label">Request body ({row.requestBodyBytes} bytes)</h4>
-        <pre className="max-h-40 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">
-          {row.requestBody}
-        </pre>
-      </section>
-    )}
+    </DetailSection>
+    <BodySection title="Request body" body={row.requestBody} bytes={row.requestBodyBytes} />
     {row.kind === "request" && (
-      <section className="flex flex-col gap-1">
-        <h4 className="text-xs text-label">Response headers</h4>
+      <DetailSection title="Response headers">
         <HeaderTable headers={row.responseHeaders} />
-      </section>
+      </DetailSection>
     )}
-    {row.responseBody && (
-      <section className="flex flex-col gap-1">
-        <h4 className="text-xs text-label">Response body ({row.responseBodyBytes} bytes)</h4>
-        <pre className="max-h-40 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">
-          {row.responseBody}
-        </pre>
-      </section>
-    )}
+    <BodySection title="Response body" body={row.responseBody} bytes={row.responseBodyBytes} />
     {row.truncated && <p className="text-xs text-muted">Body truncated by the gateway body cap.</p>}
+  </div>
+);
+
+const L1RowItem = ({
+  row,
+  isActive,
+  isOpen,
+  onToggle,
+  onSeek
+}: {
+  row: TL1Row;
+  isActive: boolean;
+  isOpen: boolean;
+  onToggle: (id: string) => void;
+  onSeek: (sessionMs: number) => void;
+}) => (
+  <div className={isActive ? "bg-container-hover" : undefined} data-active={isActive || undefined}>
+    <div className="flex items-center gap-2 px-2 py-1.5 text-xs">
+      <button
+        type="button"
+        className="text-muted hover:text-foreground"
+        aria-label={isOpen ? "Collapse request" : "Expand request"}
+        aria-expanded={isOpen}
+        onClick={() => onToggle(row.id)}
+      >
+        {isOpen ? (
+          <ChevronDownIcon className="size-3.5" />
+        ) : (
+          <ChevronRightIcon className="size-3.5" />
+        )}
+      </button>
+      <button
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        onClick={() => onSeek(row.sessionMs)}
+      >
+        <span className="w-12 shrink-0 font-mono text-muted tabular-nums">
+          {formatSessionTime(row.sessionMs)}
+        </span>
+        <span className="w-14 shrink-0 font-mono">{row.method}</span>
+        <span className="min-w-0 flex-1 truncate font-mono">{row.url}</span>
+      </button>
+      {row.action && <Badge variant="info">{ACTION_LABEL[row.action]}</Badge>}
+      <Badge variant={statusVariant(row)}>
+        {row.kind === "blocked" ? (
+          <>
+            <BanIcon />
+            Blocked
+          </>
+        ) : (
+          (row.status ?? "...")
+        )}
+      </Badge>
+    </div>
+    {isOpen && <RowDetail row={row} />}
   </div>
 );
 
@@ -129,54 +186,15 @@ export const GatewayHttpLog = ({ rows, playheadMs, autoFollow, onSeek }: Props) 
             estimateSize={36}
             getKey={(r) => r.id}
             ariaLabel="Gateway network log"
-            renderRow={(row, isActive) => {
-              const isOpen = expanded.has(row.id);
-              return (
-                <div
-                  className={isActive ? "bg-container-hover" : undefined}
-                  data-active={isActive || undefined}
-                >
-                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs">
-                    <button
-                      type="button"
-                      className="text-muted hover:text-foreground"
-                      aria-label={isOpen ? "Collapse request" : "Expand request"}
-                      aria-expanded={isOpen}
-                      onClick={() => toggle(row.id)}
-                    >
-                      {isOpen ? (
-                        <ChevronDownIcon className="size-3.5" />
-                      ) : (
-                        <ChevronRightIcon className="size-3.5" />
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                      onClick={() => onSeek(row.sessionMs)}
-                    >
-                      <span className="w-12 shrink-0 font-mono text-muted tabular-nums">
-                        {formatSessionTime(row.sessionMs)}
-                      </span>
-                      <span className="w-14 shrink-0 font-mono">{row.method}</span>
-                      <span className="min-w-0 flex-1 truncate font-mono">{row.url}</span>
-                    </button>
-                    {row.action && <Badge variant="info">{row.action.replace("_", " ")}</Badge>}
-                    <Badge variant={statusVariant(row)}>
-                      {row.kind === "blocked" ? (
-                        <>
-                          <BanIcon />
-                          Blocked
-                        </>
-                      ) : (
-                        (row.status ?? "...")
-                      )}
-                    </Badge>
-                  </div>
-                  {isOpen && <RowDetail row={row} />}
-                </div>
-              );
-            }}
+            renderRow={(row, isActive) => (
+              <L1RowItem
+                row={row}
+                isActive={isActive}
+                isOpen={expanded.has(row.id)}
+                onToggle={toggle}
+                onSeek={onSeek}
+              />
+            )}
           />
         )}
       </div>

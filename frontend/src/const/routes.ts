@@ -418,6 +418,10 @@ export const ROUTE_PATHS = Object.freeze({
     DiscoveryPage: setRoute(
       "/organizations/$orgId/pam/discovery",
       "/_authenticate/_inject-org-details/_org-layout/organizations/$orgId/pam/_pam-layout/discovery"
+    ),
+    SessionDetailPage: setRoute(
+      "/organizations/$orgId/pam/sessions/$sessionId",
+      "/_authenticate/_inject-org-details/_org-layout/organizations/$orgId/pam/_pam-layout/sessions/$sessionId"
     )
   },
   Public: {

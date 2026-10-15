@@ -21,7 +21,6 @@ type Props = {
 };
 
 const WIDTH = 1000;
-const LANE_LABEL_W = 0;
 const LANE1_Y = 22;
 const LANE2_Y = 70;
 const LANE_H = 24;
@@ -60,6 +59,93 @@ export const msFromPointer = (
   return startMs + ratio * (endMs - startMs);
 };
 
+type TScale = {
+  x: (ms: number) => number;
+  w: (fromMs: number, toMs: number) => number;
+};
+
+const CoverageRects = ({
+  spans,
+  y,
+  scale
+}: {
+  spans: TTimelineSpan[];
+  y: number;
+  scale: TScale;
+}) => (
+  <>
+    {spans.map((c) => (
+      <rect
+        key={`${y}-${c.fromMs}-${c.toMs}`}
+        x={scale.x(c.fromMs)}
+        y={y}
+        width={scale.w(c.fromMs, c.toMs)}
+        height={LANE_H}
+        className="fill-foreground/15"
+      />
+    ))}
+  </>
+);
+
+const HoleRect = ({
+  hole,
+  y,
+  scale,
+  onClick
+}: {
+  hole: TTimelineHole;
+  y: number;
+  scale: TScale;
+  onClick: (e: MouseEvent) => void;
+}) => (
+  <rect
+    x={scale.x(hole.fromMs)}
+    y={y}
+    width={scale.w(hole.fromMs, hole.toMs)}
+    height={LANE_H}
+    className="fill-page stroke-danger"
+    strokeDasharray="4 3"
+    data-testid="timeline-hole"
+    onClick={onClick}
+  >
+    <title>{hole.label}</title>
+  </rect>
+);
+
+const IntervalFlagMark = ({
+  flag,
+  hatchId,
+  scale,
+  onClick
+}: {
+  flag: TFlag;
+  hatchId: string;
+  scale: TScale;
+  onClick: (e: MouseEvent) => void;
+}) => (
+  <g className={FLAG_CLASS[flag.kind]} onClick={onClick} data-testid={`timeline-flag-${flag.kind}`}>
+    <title>{flag.label}</title>
+    {flag.kind === "viewer_degraded" ? (
+      <rect
+        x={scale.x(flag.fromMs)}
+        y={LANE1_Y + LANE_H - 4}
+        width={scale.w(flag.fromMs, flag.toMs)}
+        height={4}
+        className="fill-current opacity-60"
+      />
+    ) : (
+      <rect
+        x={scale.x(flag.fromMs)}
+        y={LANE1_Y}
+        width={scale.w(flag.fromMs, flag.toMs)}
+        height={LANE2_Y + LANE_H - LANE1_Y}
+        fill={`url(#${hatchId})`}
+        opacity={0.7}
+      />
+    )}
+  </g>
+);
+
 export const TwoLaneTimeline = ({
   startMs,
   endMs,
@@ -75,11 +161,9 @@ export const TwoLaneTimeline = ({
 }: Props) => {
   const hatchId = `${useId()}-hatch`;
   const span = Math.max(1, endMs - startMs);
-  const x = (ms: number) =>
-    LANE_LABEL_W +
-    ((Math.min(Math.max(ms, startMs), endMs) - startMs) / span) * (WIDTH - LANE_LABEL_W);
-  const w = (from: number, to: number) => Math.max(2, x(to) - x(from));
   const clamp = (ms: number) => Math.min(Math.max(ms, startMs), endMs);
+  const x = (ms: number) => ((clamp(ms) - startMs) / span) * WIDTH;
+  const scale: TScale = { x, w: (from, to) => Math.max(2, x(to) - x(from)) };
 
   const seekFromEvent = (e: MouseEvent<SVGSVGElement>) => {
     onSeek(msFromPointer(e.clientX, e.currentTarget.getBoundingClientRect(), startMs, endMs));
@@ -154,71 +238,34 @@ export const TwoLaneTimeline = ({
           {[LANE1_Y, LANE2_Y].map((y) => (
             <rect key={y} x={0} y={y} width={WIDTH} height={LANE_H} className="fill-container" />
           ))}
-          {visualCoverage.map((c) => (
-            <rect
-              key={`v-${c.fromMs}`}
-              x={x(c.fromMs)}
+          <CoverageRects spans={visualCoverage} y={LANE1_Y} scale={scale} />
+          <CoverageRects spans={networkCoverage} y={LANE2_Y} scale={scale} />
+          {visualHoles.map((h) => (
+            <HoleRect
+              key={`hole-v-${h.label}`}
+              hole={h}
               y={LANE1_Y}
-              width={w(c.fromMs, c.toMs)}
-              height={LANE_H}
-              className="fill-foreground/15"
-            />
-          ))}
-          {networkCoverage.map((c) => (
-            <rect
-              key={`n-${c.fromMs}`}
-              x={x(c.fromMs)}
-              y={LANE2_Y}
-              width={w(c.fromMs, c.toMs)}
-              height={LANE_H}
-              className="fill-foreground/15"
-            />
-          ))}
-          {[
-            ...visualHoles.map((h) => ({ ...h, y: LANE1_Y })),
-            ...networkHoles.map((h) => ({ ...h, y: LANE2_Y }))
-          ].map((h) => (
-            <rect
-              key={`hole-${h.y}-${h.fromMs}`}
-              x={x(h.fromMs)}
-              y={h.y}
-              width={w(h.fromMs, h.toMs)}
-              height={LANE_H}
-              className="fill-page stroke-danger"
-              strokeDasharray="4 3"
-              data-testid="timeline-hole"
+              scale={scale}
               onClick={pinHandler(h.fromMs)}
-            >
-              <title>{h.label}</title>
-            </rect>
+            />
+          ))}
+          {networkHoles.map((h) => (
+            <HoleRect
+              key={`hole-n-${h.label}`}
+              hole={h}
+              y={LANE2_Y}
+              scale={scale}
+              onClick={pinHandler(h.fromMs)}
+            />
           ))}
           {intervalFlags.map((f) => (
-            <g
+            <IntervalFlagMark
               key={f.id}
-              className={FLAG_CLASS[f.kind]}
+              flag={f}
+              hatchId={hatchId}
+              scale={scale}
               onClick={pinHandler(f.fromMs)}
-              data-testid={`timeline-flag-${f.kind}`}
-            >
-              <title>{f.label}</title>
-              {f.kind === "viewer_degraded" ? (
-                <rect
-                  x={x(f.fromMs)}
-                  y={LANE1_Y + LANE_H - 4}
-                  width={w(f.fromMs, f.toMs)}
-                  height={4}
-                  className="fill-current opacity-60"
-                />
-              ) : (
-                <rect
-                  x={x(f.fromMs)}
-                  y={LANE1_Y}
-                  width={w(f.fromMs, f.toMs)}
-                  height={LANE2_Y + LANE_H - LANE1_Y}
-                  fill={`url(#${hatchId})`}
-                  opacity={0.7}
-                />
-              )}
-            </g>
+            />
           ))}
           {inputPins.map((p) => (
             <rect

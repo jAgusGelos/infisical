@@ -102,3 +102,19 @@ export const IntegrityIssueBanner = ({
     <AlertDescription>{detail}</AlertDescription>
   </Alert>
 );
+
+export const NotWebAppSessionState = ({ orgId }: { orgId: string }) => (
+  <Empty className="mt-4 border">
+    <EmptyHeader>
+      <EmptyTitle>This view is for Web App sessions</EmptyTitle>
+      <EmptyDescription>Open this session from the sessions list instead.</EmptyDescription>
+    </EmptyHeader>
+    <EmptyContent>
+      <Button asChild variant="outline">
+        <Link to="/organizations/$orgId/pam/sessions" params={{ orgId }}>
+          Back to sessions
+        </Link>
+      </Button>
+    </EmptyContent>
+  </Empty>
+);
