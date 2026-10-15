@@ -233,6 +233,15 @@ describe("pam web app contract: envelope, keys, checkpoints", () => {
     await expect(openObject(hexToBytes(cv.sessionKeyHex), hexToBytes(cv.storedObjectHex), aad)).rejects.toThrow();
   });
 
+  test("decrypts with a session key that is a Buffer view at a nonzero offset", async () => {
+    const cv = checkpoints[0];
+    const unwrapped = Buffer.concat([Buffer.alloc(32, 0xaa), Buffer.from(hexToBytes(cv.sessionKeyHex))]);
+    const sessionKey = unwrapped.subarray(32, 64);
+    const aad = await buildAad(cv.projectId, cv.sessionId, cv.series as Series, cv.objectIndex);
+    const plain = await openObject(sessionKey, hexToBytes(cv.storedObjectHex), aad);
+    expect(bytesToHex(plain)).toBe(cv.plaintextHex);
+  });
+
   test("base64 helpers", () => {
     expect(bytesToHex(base64ToBytes("AAEC"))).toBe("000102");
   });

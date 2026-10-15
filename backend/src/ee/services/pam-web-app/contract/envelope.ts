@@ -54,7 +54,9 @@ const textDecoder = new TextDecoder();
 
 const subtle = () => globalThis.crypto.subtle;
 
-const toArrayBuffer = (b: Uint8Array): ArrayBuffer => b.slice().buffer as ArrayBuffer;
+// Buffer.prototype.slice returns a view, not a copy, so `.slice().buffer` on a Buffer (e.g. a KMS-unwrapped
+// subarray) hands WebCrypto the whole backing store. Copy through the Uint8Array constructor instead.
+const toArrayBuffer = (b: Uint8Array): ArrayBuffer => new Uint8Array(b).buffer as ArrayBuffer;
 
 export const concatBytes = (...parts: Uint8Array[]): Uint8Array => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
