@@ -274,7 +274,11 @@ export const pamWebAppCheckpointServiceFactory = ({
         "Web App recordings require S3 object storage with Object Lock; the account template uses Postgres storage"
       );
     }
-    if (storage.provider.assertObjectLock && !(await storage.provider.assertObjectLock({ config: storage.config }))) {
+    if (
+      storage.config.requireObjectLock !== false &&
+      storage.provider.assertObjectLock &&
+      !(await storage.provider.assertObjectLock({ config: storage.config }))
+    ) {
       throw new PamWebAppError(
         PamWebAppErrorCode.ObjectLockRequired,
         "Web App recordings require Object Lock to be enabled on the configured S3 bucket"

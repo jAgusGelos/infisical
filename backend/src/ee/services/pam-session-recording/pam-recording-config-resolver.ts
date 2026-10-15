@@ -59,6 +59,7 @@ export const resolvePamRecordingConfig = async (
 
     return {
       backend: PamRecordingStorageBackend.AwsS3,
+      requireObjectLock: templateSettings.webApp?.requireObjectLock ?? true,
       bucket: s3Config.bucket,
       region: s3Config.region as AWSRegion,
       keyPrefix: s3Config.keyPrefix ?? null,
