@@ -18,6 +18,7 @@ import {
   CLOUD_CONNECTION_VALIDATORS,
   exceedsOraclePasswordLimit,
   ORACLE_MAX_PASSWORD_LENGTH,
+  runGatewayConnectionTest,
   testVerifiesCredential
 } from "../pam-account/pam-account-connection-test";
 import { TPamAccountDALFactory, TPamAccountDetail } from "../pam-account/pam-account-dal";
@@ -255,7 +256,12 @@ export const pamAccountHeartbeatServiceFactory = ({
       return { status: PamHeartbeatStatus.CannotCheck, message: "No gateway is attached to this account" };
     }
 
-    const result = await testBuiltConnectionWithGateway(test, gatewayId, gatewayV2Service, HEARTBEAT_TIMEOUT_MS);
+    // No tcp fallback here: reachability says nothing about the credential this check reports on.
+    const { result } = await runGatewayConnectionTest(
+      test,
+      (built) => testBuiltConnectionWithGateway(built, gatewayId, gatewayV2Service, HEARTBEAT_TIMEOUT_MS),
+      { fallbackToTcp: false }
+    );
 
     if (!result) {
       return { status: PamHeartbeatStatus.CannotCheck, message: "The gateway could not be reached" };

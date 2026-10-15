@@ -159,6 +159,7 @@ export * from "./pam-resources";
 export * from "./pam-session-event-batches";
 export * from "./pam-session-event-chunks";
 export * from "./pam-sessions";
+export * from "./pam-web-app-manifests";
 export * from "./pam-web-app-objects";
 export * from "./pam-web-app-session-keys";
 export * from "./pki-acme-accounts";
