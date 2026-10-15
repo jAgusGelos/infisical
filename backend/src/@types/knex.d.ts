@@ -829,6 +829,11 @@ import {
 } from "@app/db/schemas/pam-session-event-chunks";
 import { TPamSessions, TPamSessionsInsert, TPamSessionsUpdate } from "@app/db/schemas/pam-sessions";
 import {
+  TPamWebAppManifests,
+  TPamWebAppManifestsInsert,
+  TPamWebAppManifestsUpdate
+} from "@app/db/schemas/pam-web-app-manifests";
+import {
   TPamWebAppObjects,
   TPamWebAppObjectsInsert,
   TPamWebAppObjectsUpdate
@@ -1889,6 +1894,11 @@ declare module "knex/types/tables" {
       TPamWebAppSessionKeys,
       TPamWebAppSessionKeysInsert,
       TPamWebAppSessionKeysUpdate
+    >;
+    [TableName.PamWebAppManifest]: KnexOriginal.CompositeTableType<
+      TPamWebAppManifests,
+      TPamWebAppManifestsInsert,
+      TPamWebAppManifestsUpdate
     >;
     [TableName.PamWebAppObject]: KnexOriginal.CompositeTableType<
       TPamWebAppObjects,

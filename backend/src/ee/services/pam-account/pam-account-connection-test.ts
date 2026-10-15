@@ -1,6 +1,14 @@
 import ConnectionString from "mongodb-connection-string-url";
 
-import { PamAccountType, PamPostgresAuthMethod, PamSshAuthMethod } from "../pam/pam-enums";
+import { GatewayFailureKind, TestConnectionResponse } from "@app/lib/gateway-v2/test-connection-rpc";
+
+import {
+  PamAccountType,
+  PamPostgresAuthMethod,
+  PamSshAuthMethod,
+  PamWebAppAuthMethod,
+  PamWebAppHeaderScheme
+} from "../pam/pam-enums";
 import {
   AWS_STS_MIN_DURATION_SECONDS,
   generateAwsIamSessionCredentials,
@@ -13,7 +21,8 @@ import {
   isCredentialConfigured,
   ORACLE_MAX_PASSWORD_LENGTH,
   ORACLE_MIN_GATEWAY_VERSION,
-  qualifyUsernameWithDomain
+  qualifyUsernameWithDomain,
+  validateConnectionDetails
 } from "./pam-account-schemas";
 
 export { ORACLE_MAX_PASSWORD_LENGTH, ORACLE_MIN_GATEWAY_VERSION };
@@ -27,6 +36,7 @@ export enum TestConnectionMode {
   SSH = "ssh",
   Snowflake = "snowflake",
   ClickHouse = "clickhouse",
+  WebApp = "web-app",
   Tcp = "tcp"
 }
 
@@ -125,7 +135,28 @@ export type TestConnectionRequest =
       sslRejectUnauthorized?: boolean;
       sslCertificate?: string;
     }
+  | {
+      mode: TestConnectionMode.WebApp;
+      url: string;
+      allowedHosts: string[];
+      sslRejectUnauthorized?: boolean;
+      sslCertificate?: string;
+      authMethod: PamWebAppAuthMethod.None | PamWebAppAuthMethod.Header;
+      headerScheme?: PamWebAppHeaderScheme;
+      username?: string;
+      password?: string;
+      token?: string;
+      headerName?: string;
+      headerValue?: string;
+    }
   | { mode: TestConnectionMode.Tcp };
+
+export type TGatewayConnectionTest = {
+  host: string;
+  port: number;
+  request: TestConnectionRequest;
+  additionalPorts?: number[];
+};
 
 const SQL_DIALECTS = {
   [PamAccountType.Postgres]: "postgres",
@@ -136,8 +167,10 @@ const SQL_DIALECTS = {
 
 const tcp = (host: string, port: number) => ({ host, port, request: { mode: TestConnectionMode.Tcp } as const });
 
-export const testVerifiesCredential = (request: TestConnectionRequest): boolean =>
-  request.mode !== TestConnectionMode.Tcp && !("probeOnly" in request && request.probeOnly);
+export const testVerifiesCredential = (request: TestConnectionRequest): boolean => {
+  if (request.mode === TestConnectionMode.WebApp) return request.authMethod === PamWebAppAuthMethod.Header;
+  return request.mode !== TestConnectionMode.Tcp && !("probeOnly" in request && request.probeOnly);
+};
 
 export const exceedsOraclePasswordLimit = (
   accountType: PamAccountType,
@@ -155,12 +188,7 @@ export const buildGatewayConnectionTest = async (
   orgId: string,
   // Off for account create and update, which must not fail against a gateway predating the test they need.
   opts?: { allowNewerGatewayTests?: boolean }
-): Promise<{
-  host: string;
-  port: number;
-  request: TestConnectionRequest;
-  additionalPorts?: number[];
-} | null> => {
+): Promise<TGatewayConnectionTest | null> => {
   const creds = credentials && isCredentialConfigured(accountType, credentials) ? credentials : null;
 
   const target =
@@ -439,12 +467,160 @@ export const buildGatewayConnectionTest = async (
     }
     case PamAccountType.Windows:
       return tcp(host, port);
-    // Reachability only until the gateway answers the Web App HTTP test (CONTRACTS 8.4).
-    case PamAccountType.WebApp:
-      return tcp(host, port);
+    // Safe on create and update too: runGatewayConnectionTest falls back to tcp when the gateway predates this mode.
+    case PamAccountType.WebApp: {
+      const cd = validateConnectionDetails(accountType, connectionDetails) as {
+        url: string;
+        allowedHosts: string[];
+        sslRejectUnauthorized?: boolean;
+        sslCertificate?: string;
+      };
+      const c = creds as {
+        authMethod: PamWebAppAuthMethod;
+        headerScheme?: PamWebAppHeaderScheme;
+        username?: string;
+        password?: string;
+        token?: string;
+        headerName?: string;
+        headerValue?: string;
+      } | null;
+      const base = {
+        mode: TestConnectionMode.WebApp,
+        url: cd.url,
+        allowedHosts: cd.allowedHosts,
+        sslRejectUnauthorized: cd.sslRejectUnauthorized,
+        sslCertificate: cd.sslCertificate
+      } as const;
+      // A form login is only checked up to the HTTP answer, so its secrets never leave the backend for it.
+      if (c?.authMethod !== PamWebAppAuthMethod.Header || !c.headerScheme) {
+        return { host, port, request: { ...base, authMethod: PamWebAppAuthMethod.None } };
+      }
+      return {
+        host,
+        port,
+        request: {
+          ...base,
+          authMethod: PamWebAppAuthMethod.Header,
+          headerScheme: c.headerScheme,
+          username: c.username,
+          password: c.password,
+          token: c.token,
+          headerName: c.headerName,
+          headerValue: c.headerValue
+        }
+      };
+    }
     default:
       return null;
   }
+};
+
+const WEB_APP_TEST_STEPS = new Set(["resolve", "policy", "tls", "http", "login"]);
+const WEB_APP_MESSAGE_MAX_LENGTH = 300;
+
+type TWebAppTestResult = { ok: boolean; step?: string; httpStatus?: number; message?: string };
+
+// CONTRACTS 8.4 result, either bare or inside the handler's usual `result` envelope
+const readWebAppTestResult = (payload: unknown): TWebAppTestResult | null => {
+  if (!payload || typeof payload !== "object") return null;
+  const candidate = "result" in payload ? (payload as { result: unknown }).result : payload;
+  if (!candidate || typeof candidate !== "object") return null;
+  const { ok, step, httpStatus, message } = candidate as Record<string, unknown>;
+  if (typeof ok !== "boolean") return null;
+  if (step !== undefined && (typeof step !== "string" || !WEB_APP_TEST_STEPS.has(step))) return null;
+  if (!ok && step === undefined) return null;
+  return {
+    ok,
+    step: step as string | undefined,
+    httpStatus: typeof httpStatus === "number" ? httpStatus : undefined,
+    message: typeof message === "string" ? message : undefined
+  };
+};
+
+const webAppSecrets = (request: Extract<TestConnectionRequest, { mode: TestConnectionMode.WebApp }>): string[] => {
+  const secrets = [request.password, request.token, request.headerValue];
+  if (request.username !== undefined && request.password) {
+    secrets.push(Buffer.from(`${request.username}:${request.password}`).toString("base64"));
+  }
+  return secrets.filter((s): s is string => typeof s === "string" && s.length > 0);
+};
+
+const redactSecrets = (text: string, secrets: string[]) =>
+  secrets.reduce((acc, secret) => acc.split(secret).join("[redacted]"), text);
+
+const describeWebAppFailure = (result: TWebAppTestResult, detail: string | undefined, secrets: string[]) => {
+  const raw = (detail ?? "").trim();
+  const clean = redactSecrets(raw, secrets).slice(0, WEB_APP_MESSAGE_MAX_LENGTH);
+  const at = result.step ? ` at ${result.step}` : "";
+  if (result.httpStatus !== undefined) {
+    return `Web App check failed${at}: the app answered HTTP ${result.httpStatus}${clean ? ` (${clean})` : ""}`;
+  }
+  return `Web App check failed${at}${clean ? `: ${clean}` : ""}`;
+};
+
+const webAppFailureKind = (result: TWebAppTestResult): GatewayFailureKind => {
+  if (result.step === "login" || result.httpStatus === 401 || result.httpStatus === 403) return "auth";
+  return "transport";
+};
+
+const isUnsupportedModeAnswer = (response: TestConnectionResponse) =>
+  !response.ok && response.errorMessage.toLowerCase().includes("unsupported test-connection mode");
+
+// Maps the gateway's Web App answer onto the shared response shape; null when the gateway did not answer the mode.
+export const interpretWebAppTestResponse = (
+  response: TestConnectionResponse,
+  request: Extract<TestConnectionRequest, { mode: TestConnectionMode.WebApp }>
+): TestConnectionResponse | null => {
+  if (isUnsupportedModeAnswer(response)) return null;
+  const secrets = webAppSecrets(request);
+  const result = readWebAppTestResult(response.payload);
+  if (result?.ok) return { ok: true, status: response.status };
+  if (result) {
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: describeWebAppFailure(result, result.message, secrets),
+      kind: webAppFailureKind(result)
+    };
+  }
+  if (response.ok) return null;
+  const hasErrorEnvelope = Boolean((response.payload as { error?: { message?: unknown } } | undefined)?.error?.message);
+  if (!hasErrorEnvelope) return null;
+  return {
+    ok: false,
+    status: response.status,
+    errorMessage: describeWebAppFailure({ ok: false }, response.errorMessage, secrets),
+    kind: response.kind
+  };
+};
+
+// Runs a built test through `run`, interpreting the Web App answer. With fallbackToTcp, a gateway that does not
+// answer the Web App mode gets a reachability test instead; `request` is the one whose result is returned.
+export const runGatewayConnectionTest = async (
+  test: TGatewayConnectionTest,
+  run: (test: TGatewayConnectionTest) => Promise<TestConnectionResponse | null>,
+  opts: { fallbackToTcp: boolean }
+): Promise<{ result: TestConnectionResponse | null; request: TestConnectionRequest }> => {
+  const response = await run(test);
+  const { request } = test;
+  if (request.mode !== TestConnectionMode.WebApp || !response) return { result: response, request };
+
+  const interpreted = interpretWebAppTestResponse(response, request);
+  if (interpreted) return { result: interpreted, request };
+
+  if (!opts.fallbackToTcp) {
+    return {
+      result: {
+        ok: false,
+        status: response.status,
+        errorMessage: 'unsupported test-connection mode: "web-app"',
+        kind: null
+      },
+      request
+    };
+  }
+  const fallback = tcp(test.host, test.port);
+  return { result: await run(fallback), request: fallback.request };
 };
 
 // cloud accounts have no gateway-reachable host; the test validates the brokering credentials instead

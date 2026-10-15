@@ -137,7 +137,7 @@ describe("web-app credentials", () => {
 });
 
 describe("web-app connection test", () => {
-  test("builds a tcp reachability test on the URL host and port", async () => {
+  test("builds a web-app test on the URL host and port", async () => {
     const result = await buildGatewayConnectionTest(
       PamAccountType.WebApp,
       { url: "https://app.internal.example:8443/" },
@@ -145,7 +145,11 @@ describe("web-app connection test", () => {
       ORG_ID
     );
 
-    expect(result).toEqual({ host: "app.internal.example", port: 8443, request: { mode: TestConnectionMode.Tcp } });
+    expect(result).toMatchObject({
+      host: "app.internal.example",
+      port: 8443,
+      request: { mode: TestConnectionMode.WebApp, authMethod: "none", allowedHosts: ["app.internal.example"] }
+    });
   });
 });
 
