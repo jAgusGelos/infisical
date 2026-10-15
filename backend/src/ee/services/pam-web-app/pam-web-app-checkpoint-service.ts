@@ -40,6 +40,7 @@ import {
 } from "./contract";
 import { TPamWebAppObjectDALFactory, TPamWebAppSessionKeyDALFactory } from "./pam-web-app-dal";
 import { PamWebAppError, PamWebAppErrorCode } from "./pam-web-app-errors";
+import type { TPamWebAppManifestServiceFactory } from "./pam-web-app-manifest-service";
 
 export const PAM_WEB_APP_MAX_OBJECT_BYTES = 64 * 1024 * 1024;
 export const PAM_WEB_APP_MAX_EVENTS_SEQ_SPAN = 10_000;
@@ -205,7 +206,19 @@ type TPamWebAppCheckpointServiceFactoryDep = {
   resolveStorage: (accountId: string) => Promise<TPamWebAppStorage | null>;
   getSessionKey: (session: TWebAppSession) => Promise<Uint8Array>;
   assertSessionViewAccess: (session: TWebAppSession, actor: OrgServiceActor) => Promise<void>;
+  pamWebAppManifestService?: Pick<TPamWebAppManifestServiceFactory, "signManifest" | "getManifest">;
+  pamAccountDAL?: { findById: (id: string) => Promise<{ folderId?: string | null } | undefined> };
   now?: () => number;
+};
+
+type TCheckpointResult = {
+  accepted: true;
+  duplicate: boolean;
+  checkpoint: TCheckpoint;
+  accountId?: string | null;
+  folderId?: string | null;
+  signerKeyId?: string;
+  fingerprint?: string;
 };
 
 export type TPamWebAppCheckpointServiceFactory = ReturnType<typeof pamWebAppCheckpointServiceFactory>;
@@ -219,8 +232,12 @@ export const pamWebAppCheckpointServiceFactory = ({
   resolveStorage,
   getSessionKey,
   assertSessionViewAccess,
+  pamWebAppManifestService,
+  pamAccountDAL,
   now = Date.now
 }: TPamWebAppCheckpointServiceFactoryDep) => {
+  const manifestLocks = new Map<string, Promise<void>>();
+
   const getWebAppSession = async (sessionId: string) => {
     const session = await pamSessionDAL.findById(sessionId);
     if (!session || session.accountType !== PamAccountType.WebApp) {
@@ -255,6 +272,16 @@ export const pamWebAppCheckpointServiceFactory = ({
       throw new PamWebAppError(
         PamWebAppErrorCode.ObjectLockRequired,
         "Web App recordings require S3 object storage with Object Lock; the account template uses Postgres storage"
+      );
+    }
+    if (
+      storage.config.requireObjectLock !== false &&
+      storage.provider.assertObjectLock &&
+      !(await storage.provider.assertObjectLock({ config: storage.config }))
+    ) {
+      throw new PamWebAppError(
+        PamWebAppErrorCode.ObjectLockRequired,
+        "Web App recordings require Object Lock to be enabled on the configured S3 bucket"
       );
     }
     return storage;
@@ -295,18 +322,12 @@ export const pamWebAppCheckpointServiceFactory = ({
     if (!equalBytes(cert.sessionId, uuidToBytes(session.id))) {
       throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate is bound to a different session");
     }
-    if (BigInt(now()) > cert.notAfterUnixMs) {
-      throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate has expired");
+    const currentTime = BigInt(now());
+    if (currentTime < cert.notBeforeUnixMs) {
+      throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate is not valid yet");
     }
-
-    if (session.gatewayId) {
-      const pin = await pamWebAppSessionKeyDAL.findGatewayPin(session.gatewayId);
-      if (pin && !equalBytes(new Uint8Array(pin.recordingPublicKey), recordingPublicKey)) {
-        throw new PamWebAppError(
-          PamWebAppErrorCode.RecordingKeyMismatch,
-          `Gateway's recording key changed: expected fingerprint ${pin.fingerprint}, got ${request.fingerprint}`
-        );
-      }
+    if (currentTime > cert.notAfterUnixMs) {
+      throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate has expired");
     }
 
     const existing = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
@@ -321,17 +342,45 @@ export const pamWebAppCheckpointServiceFactory = ({
       return { ok: true as const };
     }
 
-    await pamWebAppSessionKeyDAL.create({
-      sessionId: session.id,
-      gatewayId: session.gatewayId ?? null,
-      recordingPublicKey: Buffer.from(recordingPublicKey),
-      recordingKeyId: await keyIdHex(recordingPublicKey),
-      fingerprint: expectedFingerprint,
-      keyCert: Buffer.from(keyCertBytes),
-      keyCertSig: Buffer.from(keyCertSig),
-      sessionPublicKey: Buffer.from(cert.sessionPublicKey),
-      sessionKeyId: await keyIdHex(cert.sessionPublicKey)
-    });
+    try {
+      await pamWebAppSessionKeyDAL.transaction(async (tx) => {
+        if (session.gatewayId) {
+          if (typeof tx.raw === "function") {
+            await tx.raw("select pg_advisory_xact_lock(hashtext(?))", [session.gatewayId]);
+          }
+          const pin = await pamWebAppSessionKeyDAL.findGatewayPin(session.gatewayId, tx);
+          if (pin && !equalBytes(new Uint8Array(pin.recordingPublicKey), recordingPublicKey)) {
+            throw new PamWebAppError(
+              PamWebAppErrorCode.RecordingKeyMismatch,
+              `Gateway's recording key changed: expected fingerprint ${pin.fingerprint}, got ${request.fingerprint}`
+            );
+          }
+        }
+        const data = {
+          sessionId: session.id,
+          gatewayId: session.gatewayId ?? null,
+          recordingPublicKey: Buffer.from(recordingPublicKey),
+          recordingKeyId: await keyIdHex(recordingPublicKey),
+          fingerprint: expectedFingerprint,
+          keyCert: Buffer.from(keyCertBytes),
+          keyCertSig: Buffer.from(keyCertSig),
+          sessionPublicKey: Buffer.from(cert.sessionPublicKey),
+          sessionKeyId: await keyIdHex(cert.sessionPublicKey)
+        };
+        await pamWebAppSessionKeyDAL.create(data, tx);
+      });
+    } catch (err) {
+      const raced = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+      if (!raced) throw err;
+      const same =
+        equalBytes(new Uint8Array(raced.keyCert), keyCertBytes) &&
+        equalBytes(new Uint8Array(raced.keyCertSig), keyCertSig) &&
+        equalBytes(new Uint8Array(raced.recordingPublicKey), recordingPublicKey);
+      if (!same) {
+        throw new PamWebAppError(PamWebAppErrorCode.Conflict, "This session was already opened with a different key");
+      }
+      return { ok: true as const };
+    }
 
     logger.info(
       { sessionId: session.id, fingerprint: expectedFingerprint },
@@ -478,21 +527,90 @@ export const pamWebAppCheckpointServiceFactory = ({
     return plaintext;
   };
 
-  const readPlaintext = async (
+  async function readPlaintext(
     session: TWebAppSession,
     storage: TPamWebAppStorage,
     sessionKey: Uint8Array,
     ref: TStoredRef
-  ) => decryptStoredObject(session, sessionKey, ref, await readStoredObject(session, storage, ref));
+  ) {
+    return decryptStoredObject(session, sessionKey, ref, await readStoredObject(session, storage, ref));
+  }
 
-  const rowRef = (row: TPamWebAppObjects): TStoredRef => ({
-    series: row.series as PamWebAppSeries,
-    objectIndex: row.objectIndex,
-    objectKey: row.objectKey,
-    versionId: row.versionId,
-    ciphertextSha256: new Uint8Array(row.ciphertextSha256),
-    plaintextSha256: new Uint8Array(row.plaintextSha256)
-  });
+  function rowRef(row: TPamWebAppObjects): TStoredRef {
+    return {
+      series: row.series as PamWebAppSeries,
+      objectIndex: row.objectIndex,
+      objectKey: row.objectKey,
+      versionId: row.versionId,
+      ciphertextSha256: new Uint8Array(row.ciphertextSha256),
+      plaintextSha256: new Uint8Array(row.plaintextSha256)
+    };
+  }
+
+  const signManifestIfComplete = async (session: TWebAppSession) => {
+    if (!pamWebAppManifestService) return;
+
+    const previous = manifestLocks.get(session.id) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+        if (keys?.finalSeq === null || keys?.finalSeq === undefined) return;
+        const objects = await pamWebAppObjectDAL.findBySessionId(session.id);
+        const covering = objects.find(
+          (object) =>
+            object.series === PamWebAppSeries.E &&
+            Number(object.firstSeq) <= Number(keys.finalSeq) &&
+            Number(object.lastSeq) >= Number(keys.finalSeq)
+        );
+        if (!covering) return;
+
+        try {
+          const storage = await getObjectStorage(session);
+          const sessionKey = await getSessionKey(session);
+          const hasLoss = await objects
+            .filter((object) => object.series === PamWebAppSeries.E)
+            .reduce(async (lossFound, object) => {
+              if (await lossFound) return true;
+              const plaintext = await readPlaintext(session, storage, sessionKey, rowRef(object));
+              return parseEnvelopes(plaintext).some(
+                (envelope) => envelope.type === EventType.Loss || envelope.type === EventType.ContinuityUnknown
+              );
+            }, Promise.resolve(false));
+
+          await pamWebAppManifestService.signManifest({
+            sessionId: session.id,
+            projectId: session.projectId,
+            recordingKeyFingerprint: keys.fingerprint,
+            finalSeq: Number(keys.finalSeq),
+            endReason: keys.endReason ?? null,
+            objects: objects.map((object) => ({
+              series: object.series,
+              objectIndex: object.objectIndex,
+              kind: object.kind,
+              firstSeq: Number(object.firstSeq),
+              lastSeq: Number(object.lastSeq),
+              objectKey: object.objectKey,
+              versionId: object.versionId,
+              binding: object.binding,
+              checkpoint: object.checkpoint
+            })),
+            hasLoss
+          });
+        } catch (err) {
+          logger.error(
+            { sessionId: session.id, error: err },
+            `Web App manifest signing deferred [sessionId=${session.id}]`
+          );
+        }
+      });
+    manifestLocks.set(session.id, current);
+    try {
+      await current;
+    } finally {
+      if (manifestLocks.get(session.id) === current) manifestLocks.delete(session.id);
+    }
+  };
 
   // The chain is checked from the chunk's own first prevHash; linking it to the previous chunk needs the
   // locked session row and happens inside the transaction.
@@ -563,7 +681,7 @@ export const pamWebAppCheckpointServiceFactory = ({
   const submitCheckpoint = async (
     request: TGatewayRequest & { checkpoint: string; signature: string; objectKey: string; versionId?: string },
     actor: OrgServiceActor
-  ) => {
+  ): Promise<TCheckpointResult> => {
     const session = await getGatewaySession(request, actor);
 
     const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
@@ -579,6 +697,12 @@ export const pamWebAppCheckpointServiceFactory = ({
     if (signature.length !== 64) throw new BadRequestError({ message: "signature must be 64 bytes of base64" });
 
     const { cp, sessionKey } = await parseAndVerifyCheckpoint(session, keys, checkpointBytes, signature);
+    if (keys.finalSeq !== null && keys.finalSeq !== undefined && Number(cp.lastSeq) > Number(keys.finalSeq)) {
+      throw new PamWebAppError(
+        PamWebAppErrorCode.Conflict,
+        `Checkpoint ends at seq ${cp.lastSeq}, after the recording's declared finalSeq ${keys.finalSeq}`
+      );
+    }
     const series = toSeriesLetter(cp.series);
     const isEvents = cp.series === Series.E;
 
@@ -595,13 +719,26 @@ export const pamWebAppCheckpointServiceFactory = ({
       throw new BadRequestError({ message: `objectKey does not match the checkpoint; expected '${expectedKey}'` });
     }
 
-    const duplicateOrConflict = (row: TPamWebAppObjects | undefined) => {
+    const duplicateOrConflict = async (row: TPamWebAppObjects | undefined) => {
       const same =
         row &&
         equalBytes(new Uint8Array(row.checkpoint), checkpointBytes) &&
         equalBytes(new Uint8Array(row.signature), signature) &&
         (row.versionId ?? null) === (request.versionId ?? null);
-      if (same) return { accepted: true as const, duplicate: true as const, checkpoint: cp };
+      if (same) {
+        if (!isEvents && row.binding === PamWebAppBinding.Pending) {
+          const covering = await pamWebAppObjectDAL.findEventChunkCovering(session.id, Number(row.lastSeq));
+          if (covering) await bindVideoToAcceptedChunk(session, storage, sessionKey, row, covering);
+        }
+        return {
+          accepted: true as const,
+          duplicate: true as const,
+          checkpoint: cp,
+          accountId: session.accountId,
+          signerKeyId: keys.sessionKeyId,
+          fingerprint: keys.fingerprint
+        };
+      }
       throw new PamWebAppError(
         PamWebAppErrorCode.Conflict,
         `Object ${series}/${cp.objectIndex} already has a different checkpoint`
@@ -721,7 +858,47 @@ export const pamWebAppCheckpointServiceFactory = ({
       { sessionId: session.id, series, objectIndex: cp.objectIndex },
       `Web App checkpoint accepted [sessionId=${session.id}] [series=${series}] [objectIndex=${cp.objectIndex}]`
     );
-    return { accepted: true as const, duplicate: false as const, checkpoint: cp };
+    await signManifestIfComplete(session);
+    const account = session.accountId && pamAccountDAL ? await pamAccountDAL.findById(session.accountId) : undefined;
+    return {
+      accepted: true as const,
+      duplicate: false as const,
+      checkpoint: cp,
+      accountId: session.accountId,
+      folderId: account?.folderId,
+      signerKeyId: keys.sessionKeyId,
+      fingerprint: keys.fingerprint
+    };
+  };
+
+  const end = async (request: TGatewayRequest & { finalSeq: number; reason: string }, actor: OrgServiceActor) => {
+    const session = await getGatewaySession(request, actor);
+    const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+    if (!keys) throw new PamWebAppError(PamWebAppErrorCode.UnknownKey, "Open the Web App recording before ending it");
+    await pamWebAppSessionKeyDAL.transaction(async (tx) => {
+      const locked = await pamWebAppSessionKeyDAL.findBySessionIdForUpdate(session.id, tx);
+      if (!locked)
+        throw new PamWebAppError(PamWebAppErrorCode.UnknownKey, "The Web App recording of this session is gone");
+      if (locked.finalSeq !== null && locked.finalSeq !== undefined && Number(locked.finalSeq) !== request.finalSeq) {
+        throw new PamWebAppError(
+          PamWebAppErrorCode.Conflict,
+          `Recording already ended at finalSeq ${locked.finalSeq}; cannot change it to ${request.finalSeq}`
+        );
+      }
+      if (locked.lastESeq !== null && locked.lastESeq !== undefined && Number(locked.lastESeq) !== request.finalSeq) {
+        throw new PamWebAppError(
+          PamWebAppErrorCode.Conflict,
+          `finalSeq ${request.finalSeq} does not match the last accepted event sequence ${locked.lastESeq}`
+        );
+      }
+      await pamWebAppSessionKeyDAL.update(
+        { sessionId: session.id },
+        { finalSeq: request.finalSeq, endReason: request.reason.trim() || null },
+        tx
+      );
+    });
+    await signManifestIfComplete(session);
+    return { ok: true as const };
   };
 
   const getViewableSession = async (sessionId: string, actor: OrgServiceActor) => {
@@ -792,7 +969,7 @@ export const pamWebAppCheckpointServiceFactory = ({
           .filter((o) => o.series === PamWebAppSeries.E)
           .map((o) => ({ ...common(o), firstSeq: Number(o.firstSeq), lastSeq: Number(o.lastSeq) }))
       },
-      manifest: null
+      manifest: pamWebAppManifestService ? await pamWebAppManifestService.getManifest(session.id) : null
     };
   };
 
@@ -892,7 +1069,7 @@ export const pamWebAppCheckpointServiceFactory = ({
     return { events };
   };
 
-  return { open, presign, submitCheckpoint, getReplay, getObject, getEvents };
+  return { open, presign, submitCheckpoint, end, getReplay, getObject, getEvents };
 };
 
 export const describeCheckpointForAudit = (cp: TCheckpoint) => ({

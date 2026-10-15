@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import {
   DeleteObjectsCommand,
   GetObjectCommand,
+  GetObjectLockConfigurationCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
@@ -275,6 +276,21 @@ export const createAwsS3RecordingStorageProvider = ({
         throw new BadRequestError({
           message: `Unable to read recording object metadata from the storage bucket [bucket=${config.bucket}]`
         });
+      }
+    },
+
+    assertObjectLock: async ({ config }) => {
+      if (!config.bucket) return false;
+      const client = await buildClient(config);
+      try {
+        const result = await client.send(new GetObjectLockConfigurationCommand({ Bucket: config.bucket }));
+        return result.ObjectLockConfiguration?.ObjectLockEnabled === "Enabled";
+      } catch (err) {
+        logger.warn(
+          { err, bucket: config.bucket },
+          `S3 Object Lock configuration check failed [bucket=${config.bucket}]`
+        );
+        return false;
       }
     },
 

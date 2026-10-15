@@ -72,6 +72,7 @@ import {
   buildGatewayConnectionTest,
   CLOUD_CONNECTION_VALIDATORS,
   runGatewayConnectionTest,
+  TestConnectionMode,
   testVerifiesCredential
 } from "./pam-account-connection-test";
 import { TPamAccountDALFactory } from "./pam-account-dal";
@@ -666,7 +667,9 @@ export const pamAccountServiceFactory = (deps: TPamAccountServiceFactoryDep) => 
       throw new BadRequestError({ message: `Connection test failed: ${result.errorMessage}` });
     }
 
-    return Boolean(result?.ok) && testVerifiesCredential(request);
+    const connectionSucceeded = Boolean(result?.ok);
+    const webAppProbe = test.request.mode === TestConnectionMode.WebApp;
+    return connectionSucceeded && (webAppProbe || testVerifiesCredential(request));
   };
 
   const create = async ({

@@ -10,6 +10,7 @@ export type TPamRecordingChunkRef = {
 
 export type TPamRecordingResolvedConfig = {
   backend: PamRecordingStorageBackend;
+  requireObjectLock?: boolean;
   bucket?: string;
   region?: AWSRegion;
   keyPrefix?: string | null;
@@ -73,6 +74,8 @@ export type TPamRecordingHeadObject = (input: {
   objectKey: string;
 }) => Promise<TPamRecordingObjectHead | null>;
 
+export type TPamRecordingAssertObjectLock = (input: { config: TPamRecordingResolvedConfig }) => Promise<boolean>;
+
 export type TPamRecordingGetObject = (input: {
   config: TPamRecordingResolvedConfig;
   objectKey: string;
@@ -86,6 +89,7 @@ export type TPamRecordingStorageProvider = () => {
   deleteSession: TPamRecordingDeleteSession;
   mintPresignedCreateOnlyPut: TPamRecordingMintPresignedCreateOnlyPut;
   headObject: TPamRecordingHeadObject;
+  assertObjectLock?: TPamRecordingAssertObjectLock;
   getObject: TPamRecordingGetObject;
 };
 

@@ -37,13 +37,18 @@ export const handleWebAppSession = async (ctx: TSessionContext): Promise<TSessio
   }
 
   return new Promise<TSessionHandlerResult>((resolve, reject) => {
-    const failConnect = (err: Error) => {
+    let onViewerClose: () => void = () => {};
+
+    function failConnect(err: Error) {
       if (settled) return;
       settled = true;
+      socket.removeListener("close", onViewerClose);
       tcpSocket.destroy();
       onCleanup();
       reject(err);
-    };
+    }
+
+    onViewerClose = () => failConnect(new Error("Web App viewer disconnected before relay setup"));
 
     const connectTimeout = setTimeout(() => {
       logger.error(`web-app session: relay connect timed out [sessionId=${sessionId}]`);
@@ -54,6 +59,7 @@ export const handleWebAppSession = async (ctx: TSessionContext): Promise<TSessio
       clearTimeout(connectTimeout);
       if (settled) return;
       settled = true;
+      socket.removeListener("close", onViewerClose);
       tcpSocket.removeAllListeners("error");
       tcpSocket.setNoDelay(true);
 
@@ -80,6 +86,7 @@ export const handleWebAppSession = async (ctx: TSessionContext): Promise<TSessio
       failConnect(err);
     });
 
+    socket.once("close", onViewerClose);
     tcpSocket.connect(relayPort, "127.0.0.1");
   });
 };
