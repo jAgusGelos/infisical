@@ -1,5 +1,6 @@
 export * from "./clock";
 export * from "./events";
+export * from "./integrity";
 export * from "./limits";
 export * from "./queries";
 export * from "./report";

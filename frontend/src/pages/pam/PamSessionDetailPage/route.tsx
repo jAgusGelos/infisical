@@ -9,7 +9,9 @@ const searchSchema = z.object({
   replayFixture: z
     .string()
     .regex(/^[a-z0-9-]+$/)
-    .optional()
+    .optional(),
+  // Session time in seconds, written by "Copy link at <time>".
+  t: z.coerce.number().min(0).optional()
 });
 
 export const Route = createFileRoute(
