@@ -1,17 +1,12 @@
 import { type KeyboardEvent, type PointerEvent, useEffect, useRef } from "react";
-import { TriangleAlert } from "lucide-react";
 
-import { ContentLoader } from "@app/components/v2";
-import { Button } from "@app/components/v3";
 import { TPamAccount } from "@app/hooks/api/pam";
 
-import { DisconnectedScreen } from "../DisconnectedScreen";
-import { WebAccessStatusCard } from "../WebAccessStatusCard";
 import { InputBatcher } from "./input/InputBatcher";
 import { mapToFramebuffer, modsOf, normalizeWheel } from "./input/mapping";
 import { canSendInput } from "./session/controlReducer";
-import { ERROR_COPY, SESSION_END_COPY } from "./copy";
 import { useWebAppSession } from "./useWebAppSession";
+import { WebAppOverlays } from "./WebAppOverlays";
 import { WebAppStatusBar } from "./WebAppStatusBar";
 
 type Props = {
@@ -27,7 +22,7 @@ const DEFAULT_FRAMEBUFFER = { width: 1280, height: 720 };
 const IME_PROCESS_KEY_CODE = 229;
 
 export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
-  const { canvasRef, state, sendInput, endSession, reconnect } = useWebAppSession({
+  const { canvasRef, state, reconnectStatus, sendInput, endSession, reconnect } = useWebAppSession({
     accountId: account.id,
     reason,
     mfaSessionId
@@ -132,10 +127,6 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
     });
   };
 
-  const { phase } = state;
-  const isConnecting = phase === "connecting" || phase === "awaiting_ready";
-  const isLive = phase === "live";
-
   return (
     <div className="flex h-dvh w-screen flex-col bg-background">
       <div className="relative min-h-0 flex-1 overflow-hidden bg-background">
@@ -165,43 +156,14 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
             if (sinkRef.current) sinkRef.current.value = "";
           }}
         />
-        {isConnecting && (
-          <ContentLoader
-            text="Starting the remote browser..."
-            className="absolute inset-0 z-10 h-full"
-          />
-        )}
-        {state.hidden === "login" && isLive && (
-          <ContentLoader text="Signing in..." className="absolute inset-0 z-10 h-full" />
-        )}
-        {phase === "failed" && (
-          <WebAccessStatusCard
-            overlay
-            tone="danger"
-            icon={TriangleAlert}
-            title="Session failed"
-            description={state.error?.message || ERROR_COPY[state.error?.code ?? "client_error"]}
-          >
-            <Button variant="pam" isFullWidth onClick={reconnect}>
-              Reconnect
-            </Button>
-          </WebAccessStatusCard>
-        )}
-        {phase === "ended" && (
-          <DisconnectedScreen
-            title="Session ended"
-            description={state.endMessage || SESSION_END_COPY[state.endReason ?? "error"]}
-            onReconnect={reconnect}
-          />
-        )}
-        {phase === "disconnected" && (
-          <DisconnectedScreen
-            description="The connection to the session was lost."
-            onReconnect={reconnect}
-          />
-        )}
+        <WebAppOverlays state={state} reconnectStatus={reconnectStatus} onReconnect={reconnect} />
       </div>
-      <WebAppStatusBar phase={phase} accountName={account.name} onEndSession={endSession} />
+      <WebAppStatusBar
+        state={state}
+        reconnectStatus={reconnectStatus}
+        accountName={account.name}
+        onEndSession={endSession}
+      />
     </div>
   );
 };
