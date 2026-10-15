@@ -668,7 +668,7 @@ export const pamAccountServiceFactory = (deps: TPamAccountServiceFactoryDep) => 
     }
 
     const connectionSucceeded = Boolean(result?.ok);
-    const webAppProbe = request.mode === TestConnectionMode.WebApp;
+    const webAppProbe = test.request.mode === TestConnectionMode.WebApp;
     return connectionSucceeded && (webAppProbe || testVerifiesCredential(request));
   };
 

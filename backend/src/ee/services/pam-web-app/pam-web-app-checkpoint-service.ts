@@ -714,13 +714,17 @@ export const pamWebAppCheckpointServiceFactory = ({
       throw new BadRequestError({ message: `objectKey does not match the checkpoint; expected '${expectedKey}'` });
     }
 
-    const duplicateOrConflict = (row: TPamWebAppObjects | undefined) => {
+    const duplicateOrConflict = async (row: TPamWebAppObjects | undefined) => {
       const same =
         row &&
         equalBytes(new Uint8Array(row.checkpoint), checkpointBytes) &&
         equalBytes(new Uint8Array(row.signature), signature) &&
         (row.versionId ?? null) === (request.versionId ?? null);
-      if (same)
+      if (same) {
+        if (!isEvents && row.binding === PamWebAppBinding.Pending) {
+          const covering = await pamWebAppObjectDAL.findEventChunkCovering(session.id, Number(row.lastSeq));
+          if (covering) await bindVideoToAcceptedChunk(session, storage, sessionKey, row, covering);
+        }
         return {
           accepted: true as const,
           duplicate: true as const,
@@ -729,6 +733,7 @@ export const pamWebAppCheckpointServiceFactory = ({
           signerKeyId: keys.sessionKeyId,
           fingerprint: keys.fingerprint
         };
+      }
       throw new PamWebAppError(
         PamWebAppErrorCode.Conflict,
         `Object ${series}/${cp.objectIndex} already has a different checkpoint`
