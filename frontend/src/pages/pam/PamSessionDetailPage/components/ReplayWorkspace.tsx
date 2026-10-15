@@ -128,7 +128,11 @@ export const ReplayWorkspace = ({
             onSkipIdleChange={setSkipIdle}
           />
         </div>
-        <ReplaySidePanel timeline={timeline} playheadMs={playheadMs} onSeek={seek} />
+        {/* Out of flow on wide screens, so the player column sets the row height and the logs scroll inside it
+            instead of stretching the page with every row. */}
+        <div className="relative h-[28rem] lg:h-auto">
+          <ReplaySidePanel timeline={timeline} playheadMs={playheadMs} onSeek={seek} />
+        </div>
       </div>
       <div className="rounded-md border border-border bg-card p-4">
         <TwoLaneTimeline

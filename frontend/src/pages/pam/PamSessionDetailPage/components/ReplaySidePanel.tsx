@@ -15,7 +15,7 @@ type Props = {
 export const ReplaySidePanel = ({ timeline, playheadMs, onSeek }: Props) => {
   const [autoFollow, setAutoFollow] = useState(true);
   return (
-    <Tabs defaultValue="network" className="flex min-h-[28rem] flex-col lg:h-[calc(100%)]">
+    <Tabs defaultValue="network" className="flex h-full flex-col lg:absolute lg:inset-0">
       <TabsList variant="pam">
         <TabsTrigger value="network">Network ({timeline.l1Rows.length})</TabsTrigger>
         <TabsTrigger value="input">Input ({timeline.inputRows.length})</TabsTrigger>
