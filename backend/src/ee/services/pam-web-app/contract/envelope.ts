@@ -1,5 +1,7 @@
 // Verification side only: the gateway (Go) produces these structures. WebCrypto (globalThis.crypto.subtle) is
-// used so the same file runs in Node and browsers.
+// used for hashing/AES; Node's native Ed25519 verifier handles raw gateway keys reliably in the API runtime.
+
+import nacl from "tweetnacl";
 
 const DOMAIN_EVENT = "infisical-webapp/event/v1";
 const DOMAIN_KEY_CERT = "infisical-webapp/key-cert/v1";
@@ -109,8 +111,7 @@ export const fingerprint = async (rawPublicKey: Uint8Array) =>
 
 const ed25519Verify = async (rawPublicKey: Uint8Array, message: Uint8Array, signature: Uint8Array) => {
   if (rawPublicKey.length !== 32 || signature.length !== 64) return false;
-  const key = await subtle().importKey("raw", toArrayBuffer(rawPublicKey), { name: "Ed25519" }, false, ["verify"]);
-  return subtle().verify({ name: "Ed25519" }, key, toArrayBuffer(signature), toArrayBuffer(message));
+  return nacl.sign.detached.verify(message, signature, rawPublicKey);
 };
 
 export type TEnvelope = {
