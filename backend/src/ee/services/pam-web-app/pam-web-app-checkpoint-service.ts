@@ -322,7 +322,11 @@ export const pamWebAppCheckpointServiceFactory = ({
     if (!equalBytes(cert.sessionId, uuidToBytes(session.id))) {
       throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate is bound to a different session");
     }
-    if (BigInt(now()) > cert.notAfterUnixMs) {
+    const currentTime = BigInt(now());
+    if (currentTime < cert.notBeforeUnixMs) {
+      throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate is not valid yet");
+    }
+    if (currentTime > cert.notAfterUnixMs) {
       throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate has expired");
     }
 
@@ -689,6 +693,12 @@ export const pamWebAppCheckpointServiceFactory = ({
     if (signature.length !== 64) throw new BadRequestError({ message: "signature must be 64 bytes of base64" });
 
     const { cp, sessionKey } = await parseAndVerifyCheckpoint(session, keys, checkpointBytes, signature);
+    if (keys.finalSeq !== null && keys.finalSeq !== undefined && Number(cp.lastSeq) > Number(keys.finalSeq)) {
+      throw new PamWebAppError(
+        PamWebAppErrorCode.Conflict,
+        `Checkpoint ends at seq ${cp.lastSeq}, after the recording's declared finalSeq ${keys.finalSeq}`
+      );
+    }
     const series = toSeriesLetter(cp.series);
     const isEvents = cp.series === Series.E;
 
@@ -856,6 +866,18 @@ export const pamWebAppCheckpointServiceFactory = ({
     const session = await getGatewaySession(request, actor);
     const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
     if (!keys) throw new PamWebAppError(PamWebAppErrorCode.UnknownKey, "Open the Web App recording before ending it");
+    if (keys.finalSeq !== null && keys.finalSeq !== undefined && Number(keys.finalSeq) !== request.finalSeq) {
+      throw new PamWebAppError(
+        PamWebAppErrorCode.Conflict,
+        `Recording already ended at finalSeq ${keys.finalSeq}; cannot change it to ${request.finalSeq}`
+      );
+    }
+    if (keys.lastESeq !== null && keys.lastESeq !== undefined && Number(keys.lastESeq) !== request.finalSeq) {
+      throw new PamWebAppError(
+        PamWebAppErrorCode.Conflict,
+        `finalSeq ${request.finalSeq} does not match the last accepted event sequence ${keys.lastESeq}`
+      );
+    }
     await pamWebAppSessionKeyDAL.update(
       { sessionId: session.id },
       { finalSeq: request.finalSeq, endReason: request.reason.trim() || null }
