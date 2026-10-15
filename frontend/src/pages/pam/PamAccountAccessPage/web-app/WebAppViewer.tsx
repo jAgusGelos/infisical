@@ -12,6 +12,7 @@ import { mapToFramebuffer, modsOf, normalizeWheel } from "./input/mapping";
 import { canSendInput } from "./session/controlReducer";
 import { ERROR_COPY, SESSION_END_COPY } from "./copy";
 import { useWebAppSession } from "./useWebAppSession";
+import { WebAppStatusBar } from "./WebAppStatusBar";
 
 type Props = {
   account: TPamAccount;
@@ -23,6 +24,8 @@ const POINTER_BUTTONS = new Set([0, 1, 2]);
 
 const DEFAULT_FRAMEBUFFER = { width: 1280, height: 720 };
 
+const IME_PROCESS_KEY_CODE = 229;
+
 export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
   const { canvasRef, state, sendInput, endSession, reconnect } = useWebAppSession({
     accountId: account.id,
@@ -31,7 +34,7 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
   });
   const sinkRef = useRef<HTMLTextAreaElement | null>(null);
   const batcherRef = useRef<InputBatcher | null>(null);
-  if (!batcherRef.current) batcherRef.current = new InputBatcher((events) => sendInput(events));
+  if (!batcherRef.current) batcherRef.current = new InputBatcher(sendInput);
   const batcher = batcherRef.current;
 
   const stateRef = useRef(state);
@@ -115,7 +118,7 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
   };
 
   const handleKey = (event: KeyboardEvent<HTMLTextAreaElement>, action: "down" | "up") => {
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (event.nativeEvent.isComposing || event.keyCode === IME_PROCESS_KEY_CODE) return;
     if (!canSendInput(stateRef.current)) return;
     event.preventDefault();
     batcher.push({
@@ -132,21 +135,6 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
   const { phase } = state;
   const isConnecting = phase === "connecting" || phase === "awaiting_ready";
   const isLive = phase === "live";
-
-  let statusLabel = "Connecting";
-  let statusDotClass = "bg-warning";
-  if (isLive) {
-    statusLabel = "Connected";
-    statusDotClass = "bg-success";
-  } else if (phase === "ending") {
-    statusLabel = "Ending session";
-  } else if (phase === "failed") {
-    statusLabel = "Error";
-    statusDotClass = "bg-danger";
-  } else if (phase === "ended" || phase === "disconnected") {
-    statusLabel = "Disconnected";
-    statusDotClass = "bg-muted";
-  }
 
   return (
     <div className="flex h-dvh w-screen flex-col bg-background">
@@ -213,25 +201,7 @@ export const WebAppViewer = ({ account, reason, mfaSessionId }: Props) => {
           />
         )}
       </div>
-      <div className="flex h-[33px] shrink-0 items-center justify-between border-t border-border bg-card px-3 text-xs">
-        <span className="flex items-center gap-1.5">
-          <span className={`inline-block size-2 rounded-full ${statusDotClass}`} />
-          <span className="text-muted">{statusLabel}</span>
-          {isLive && (
-            <button
-              type="button"
-              onClick={endSession}
-              className="ml-2 text-muted hover:text-danger"
-            >
-              End session
-            </button>
-          )}
-        </span>
-        <span>
-          <span className="text-muted">Account:</span>{" "}
-          <span className="text-muted">{account.name}</span>
-        </span>
-      </div>
+      <WebAppStatusBar phase={phase} accountName={account.name} onEndSession={endSession} />
     </div>
   );
 };
