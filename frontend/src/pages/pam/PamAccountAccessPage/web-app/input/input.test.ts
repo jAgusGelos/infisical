@@ -10,7 +10,7 @@ import {
 } from "@app/lib/pam-web-app/contract";
 
 import { InputBatcher, MIN_MOVE_INTERVAL_MS, splitInputBatches } from "./InputBatcher";
-import { mapToFramebuffer, modsOf, normalizeWheel } from "./mapping";
+import { isPasteShortcut, mapToFramebuffer, modsOf, normalizeWheel } from "./mapping";
 
 describe("mapToFramebuffer", () => {
   // 1000x800 element showing a 1280x720 stream: scale 0.78125, content 1000x562.5, 118.75 px bars top and bottom.
@@ -158,5 +158,23 @@ describe("InputBatcher", () => {
     batcher.clear();
     frame();
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("isPasteShortcut", () => {
+  const key = (code: string, mods: Partial<KeyboardEvent> = {}) => ({
+    code,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    ...mods
+  });
+
+  it("matches Ctrl+V and Meta+V only", () => {
+    expect(isPasteShortcut(key("KeyV", { ctrlKey: true }))).toBe(true);
+    expect(isPasteShortcut(key("KeyV", { metaKey: true }))).toBe(true);
+    expect(isPasteShortcut(key("KeyV"))).toBe(false);
+    expect(isPasteShortcut(key("KeyC", { ctrlKey: true }))).toBe(false);
+    expect(isPasteShortcut(key("KeyV", { ctrlKey: true, altKey: true }))).toBe(false);
   });
 });
