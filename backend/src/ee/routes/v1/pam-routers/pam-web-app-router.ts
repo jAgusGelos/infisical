@@ -13,6 +13,7 @@ import {
 } from "@app/ee/services/pam-web-app/pam-web-app-checkpoint-service";
 import { PamWebAppError, PamWebAppErrorCode } from "@app/ee/services/pam-web-app/pam-web-app-errors";
 import { ApiDocsTags } from "@app/lib/api-docs/constants";
+import { logger } from "@app/lib/logger";
 import { readLimit, writeLimit } from "@app/server/config/rateLimiter";
 import { verifyAuth } from "@app/server/plugins/auth/verify-auth";
 import { AuthMode } from "@app/services/auth/auth-type";
@@ -75,6 +76,7 @@ const withContractErrors = async <T>(reply: FastifyReply, fn: () => Promise<T>) 
     return await fn();
   } catch (err) {
     if (err instanceof PamWebAppError) {
+      logger.warn({ code: err.code, message: err.message }, "Web App contract request rejected");
       return reply.status(err.statusCode).send({ code: err.code, message: err.message });
     }
     throw err;

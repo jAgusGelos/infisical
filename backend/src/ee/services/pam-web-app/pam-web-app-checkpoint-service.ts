@@ -319,7 +319,10 @@ export const pamWebAppCheckpointServiceFactory = ({
     try {
       cert = await verifyKeyCert(recordingPublicKey, keyCertBytes, keyCertSig);
     } catch (err) {
-      logger.warn({ sessionId: session.id }, `Web App key cert rejected [sessionId=${session.id}]`);
+      logger.warn(
+        { sessionId: session.id, reason: err instanceof Error ? err.message : String(err) },
+        `Web App key cert rejected [sessionId=${session.id}]`
+      );
       throw new PamWebAppError(PamWebAppErrorCode.BadSignature, `Key certificate rejected: ${(err as Error).message}`);
     }
     if (!equalBytes(cert.sessionId, uuidToBytes(session.id))) {
@@ -516,6 +519,16 @@ export const pamWebAppCheckpointServiceFactory = ({
     try {
       plaintext = await openObject(sessionKey, stored, aad);
     } catch {
+      logger.warn(
+        {
+          sessionId: session.id,
+          projectId: session.projectId,
+          series: ref.series,
+          objectIndex: ref.objectIndex,
+          aad: bytesToHex(aad)
+        },
+        `Web App object decryption failed [sessionId=${session.id}] [series=${ref.series}] [objectIndex=${ref.objectIndex}]`
+      );
       throw new PamWebAppError(
         PamWebAppErrorCode.ChecksumMismatch,
         `Object ${ref.series}/${ref.objectIndex} failed to decrypt`
