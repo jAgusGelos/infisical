@@ -25,7 +25,7 @@ export const createFakeClock = () => {
       return id;
     },
     clearTimeout: (handle) => {
-      timers.delete(handle as number);
+      timers.delete(handle);
     },
     advance: (ms) => {
       const target = now + ms;

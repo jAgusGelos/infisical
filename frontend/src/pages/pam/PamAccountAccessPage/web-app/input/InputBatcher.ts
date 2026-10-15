@@ -5,7 +5,6 @@ export const MIN_MOVE_INTERVAL_MS = 1000 / 60;
 const encoder = new TextEncoder();
 const BATCH_OVERHEAD = encoder.encode('{"events":[]}').length;
 
-// Splits events into InputBatch payloads that each stay within MAX_UPSTREAM_PAYLOAD, preserving order.
 export const splitInputBatches = (
   events: TInputEvent[],
   maxPayload = MAX_UPSTREAM_PAYLOAD
@@ -21,7 +20,7 @@ export const splitInputBatches = (
     size = BATCH_OVERHEAD;
   };
 
-  events.forEach((event) => {
+  const append = (event: TInputEvent) => {
     const json = JSON.stringify(event);
     const { length } = encoder.encode(json);
     if (BATCH_OVERHEAD + length > maxPayload) {
@@ -30,29 +29,29 @@ export const splitInputBatches = (
     if (size + (current.length > 0 ? 1 : 0) + length > maxPayload) flush();
     size += (current.length > 0 ? 1 : 0) + length;
     current.push(json);
-  });
+  };
+
+  events.forEach(append);
   flush();
   return payloads;
 };
 
 type TScheduler = {
   now: () => number;
-  requestFrame: (fn: () => void) => unknown;
-  cancelFrame: (handle: unknown) => void;
+  requestFrame: (fn: () => void) => number;
+  cancelFrame: (handle: number) => void;
 };
 
-export const browserFrameScheduler: TScheduler = {
+const browserFrameScheduler: TScheduler = {
   now: () => performance.now(),
   requestFrame: (fn) => window.requestAnimationFrame(fn),
-  cancelFrame: (handle) => window.cancelAnimationFrame(handle as number)
+  cancelFrame: (handle) => window.cancelAnimationFrame(handle)
 };
 
-// Queues input and flushes once per animation frame. Consecutive moves collapse to the latest one and moves go out
-// at most 60 times per second; any other event flushes the pending move with it so order is kept.
 export class InputBatcher {
   private queue: TInputEvent[] = [];
 
-  private frame: unknown = null;
+  private frame: number | null = null;
 
   private lastMoveSentAt = -Infinity;
 

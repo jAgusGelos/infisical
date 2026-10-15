@@ -14,7 +14,7 @@ export type TDecoderFactory = {
   createChunk: (init: EncodedVideoChunkInit) => EncodedVideoChunk;
 };
 
-export const browserDecoderFactory: TDecoderFactory = {
+const browserDecoderFactory: TDecoderFactory = {
   createDecoder: (init) => new VideoDecoder(init),
   createChunk: (init) => new EncodedVideoChunk(init)
 };
@@ -22,11 +22,10 @@ export const browserDecoderFactory: TDecoderFactory = {
 type Options = {
   onFrame: (frame: VideoFrame) => void;
   onNeedKeyframe: () => void;
-  onError?: (error: Error) => void;
   factory?: TDecoderFactory;
 };
 
-export const toDecoderConfig = (config: TVideoConfig): VideoDecoderConfig => ({
+const toDecoderConfig = (config: TVideoConfig): VideoDecoderConfig => ({
   // Used verbatim: the contract forbids hardcoding a codec string. H.264 is Annex B, so no `description`.
   codec: config.codec,
   codedWidth: config.width,
@@ -34,8 +33,6 @@ export const toDecoderConfig = (config: TVideoConfig): VideoDecoderConfig => ({
   optimizeForLatency: true
 });
 
-// Wraps WebCodecs for a live stream: paints on output, drops deltas it cannot use, and recovers on errors by
-// reconfiguring and waiting for the next keyframe.
 export class LiveDecoder implements TLiveDecoderPort {
   private decoder: TDecoderLike | null = null;
 
@@ -78,8 +75,8 @@ export class LiveDecoder implements TLiveDecoderPort {
           data: chunk.data
         })
       );
-    } catch (err) {
-      this.recover(err as Error);
+    } catch {
+      this.recover();
       return false;
     }
     if (chunk.keyframe) this.waitingForKeyframe = false;
@@ -102,16 +99,15 @@ export class LiveDecoder implements TLiveDecoderPort {
           }
           this.options.onFrame(frame);
         },
-        error: (error) => this.recover(error)
+        error: () => this.recover()
       });
     }
     return this.decoder;
   }
 
   // A WebCodecs error closes the decoder, so recovery builds a new one from the last config.
-  private recover(error: Error) {
+  private recover() {
     if (this.closed) return;
-    this.options.onError?.(error);
     if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
     this.decoder = null;
     this.waitingForKeyframe = true;
