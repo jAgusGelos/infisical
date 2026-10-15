@@ -179,6 +179,7 @@ export type TSessionEndReason =
   | "runner_exit"
   | "login_failed"
   | "recording_failed"
+  | "viewer_lost"
   | "error";
 
 export type TControlErrorCode =
@@ -189,10 +190,29 @@ export type TControlErrorCode =
   | "capacity_exhausted"
   | "login_failed"
   | "tunnel_failed"
+  | "session_in_use"
   | "internal";
 
+export type TSessionPolicy = {
+  clipboard: "off" | "to_remote" | "from_remote" | "both";
+  downloads: "block" | "quarantine" | "allow";
+  uploads: "block" | "allow";
+};
+
+export const monoFromPts = (
+  ptsZeroUnixMs: number,
+  sessionOpenWallTimeUnixMs: number,
+  ptsUs: number
+) => (ptsZeroUnixMs - sessionOpenWallTimeUnixMs) * 1000 + ptsUs;
+
 export type TControlDown =
-  | { kind: "session_ready"; sessionId: string; expiresAt: string; inputEnabled: boolean }
+  | {
+      kind: "session_ready";
+      sessionId: string;
+      expiresAt: string;
+      inputEnabled: boolean;
+      policy?: TSessionPolicy;
+    }
   | { kind: "stream_hidden"; reason: "login" | "policy" }
   | { kind: "stream_shown" }
   | { kind: "input_state"; enabled: boolean }
