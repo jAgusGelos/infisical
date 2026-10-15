@@ -2,7 +2,12 @@ import axios from "axios";
 
 import { WEB_APP_REPLAY_FETCH_CONCURRENCY, WEB_APP_REPLAY_MAX_OBJECTS_PER_SERIES } from "./limits";
 import { ReplayObjectNotFoundError, TWebAppReplaySource } from "./source";
-import { TWebAppReplay, TWebAppReplaySeries } from "./types";
+import {
+  TWebAppEventChunkEntry,
+  TWebAppReplay,
+  TWebAppReplaySeries,
+  TWebAppVideoEntry
+} from "./types";
 import {
   assertEventLimit,
   checkVideoBinding,
@@ -131,6 +136,104 @@ const emptyReport = (ed25519Supported: boolean, includesEvents: boolean, total: 
   total
 });
 
+type TVerifyContext = {
+  source: TWebAppReplaySource;
+  sessionKey: TVerifiedSessionKey;
+  report: TReplayVerificationReport;
+  tick: () => void;
+  signal?: AbortSignal;
+};
+
+const verifyEventChunks = async (
+  ctx: TVerifyContext,
+  chunkEntries: TWebAppEventChunkEntry[]
+): Promise<TReplayFetchFailure | null> => {
+  const { report } = ctx;
+  const fetchedChunks = await mapWithConcurrency(
+    chunkEntries,
+    WEB_APP_REPLAY_FETCH_CONCURRENCY,
+    (entry) => fetchObject(ctx.source, "E", entry.objectIndex, ctx.signal)
+  );
+  let previous: TPreviousChunk = null;
+  let expectedIndex = 0;
+  for (let i = 0; i < chunkEntries.length; i += 1) {
+    const entry = chunkEntries[i];
+    const fetched = fetchedChunks[i];
+    if (entry.objectIndex !== expectedIndex) previous = null;
+    expectedIndex = entry.objectIndex + 1;
+    if (fetched.kind === "failed") {
+      return { series: "E", objectIndex: entry.objectIndex, message: fetched.message };
+    }
+    if (fetched.kind === "missing") {
+      report.events.push({ series: "E", objectIndex: entry.objectIndex, status: "missing" });
+      previous = null;
+    } else {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const chunk = await verifyEventChunk(entry, fetched.bytes, ctx.sessionKey, previous);
+        report.verifiedChunks.push(chunk);
+        report.events.push({ series: "E", objectIndex: entry.objectIndex, status: "verified" });
+        previous = { lastSeq: chunk.lastSeq, head: chunk.head };
+      } catch (err) {
+        report.events.push(toResult("E", entry.objectIndex, err));
+        previous = null;
+      }
+    }
+    ctx.tick();
+  }
+  return null;
+};
+
+const verifyVideoEntry = async (
+  ctx: TVerifyContext,
+  entry: TWebAppVideoEntry
+): Promise<TObjectResult | TVerifiedVideoObject | TReplayFetchFailure> => {
+  const fetched = await fetchObject(ctx.source, "V", entry.objectIndex, ctx.signal);
+  try {
+    if (fetched.kind === "failed") {
+      return { series: "V", objectIndex: entry.objectIndex, message: fetched.message };
+    }
+    if (fetched.kind === "missing") {
+      return { series: "V", objectIndex: entry.objectIndex, status: "missing" };
+    }
+    return await verifyVideoObject(entry, fetched.bytes, ctx.sessionKey);
+  } catch (err) {
+    return toResult("V", entry.objectIndex, err);
+  } finally {
+    ctx.tick();
+  }
+};
+
+const verifyVideoObjects = async (
+  ctx: TVerifyContext,
+  videoEntries: TWebAppVideoEntry[],
+  includeEvents: boolean
+): Promise<TReplayFetchFailure | null> => {
+  const { report } = ctx;
+  const videoResults = await mapWithConcurrency(
+    videoEntries,
+    WEB_APP_REPLAY_FETCH_CONCURRENCY,
+    (entry) => verifyVideoEntry(ctx, entry)
+  );
+  for (let i = 0; i < videoResults.length; i += 1) {
+    const r = videoResults[i];
+    if ("bytes" in r) {
+      report.verifiedVideo.push(r);
+      report.video.push({ series: "V", objectIndex: r.objectIndex, status: "verified" });
+      if (includeEvents)
+        report.bindings.set(r.objectIndex, checkVideoBinding(r, report.verifiedChunks));
+    } else if ("status" in r) {
+      report.video.push(r);
+    } else {
+      return r;
+    }
+  }
+  return null;
+};
+
+const toLimitError = (err: unknown) =>
+  err instanceof ReplayVerifyError ? err : new ReplayVerifyError("limits", String(err));
+
 export const verifyReplay = async (
   source: TWebAppReplaySource,
   replay: TWebAppReplay,
@@ -163,100 +266,39 @@ export const verifyReplay = async (
     return report;
   }
 
+  let sessionKey: TVerifiedSessionKey;
   try {
-    report.sessionKey = await verifySessionKeyCert(replay, source.expectedSessionId);
+    sessionKey = await verifySessionKeyCert(replay, source.expectedSessionId);
   } catch (err) {
     report.keyCertError =
       err instanceof ReplayVerifyError ? err : new ReplayVerifyError("key_cert", String(err));
     return report;
   }
-  const { sessionKey } = report;
+  report.sessionKey = sessionKey;
 
-  const tick = () => {
-    report.done += 1;
-    opts.onProgress?.({ done: report.done, total });
+  const ctx: TVerifyContext = {
+    source,
+    sessionKey,
+    report,
+    signal: opts.signal,
+    tick: () => {
+      report.done += 1;
+      opts.onProgress?.({ done: report.done, total });
+    }
   };
   opts.onProgress?.({ done: 0, total });
 
-  const fetchedChunks = await mapWithConcurrency(
-    chunkEntries,
-    WEB_APP_REPLAY_FETCH_CONCURRENCY,
-    (entry) => fetchObject(source, "E", entry.objectIndex, opts.signal)
-  );
-  let previous: TPreviousChunk = null;
-  let expectedIndex = 0;
-  for (let i = 0; i < chunkEntries.length; i += 1) {
-    const entry = chunkEntries[i];
-    const fetched = fetchedChunks[i];
-    if (entry.objectIndex !== expectedIndex) previous = null;
-    expectedIndex = entry.objectIndex + 1;
-    if (fetched.kind === "failed") {
-      report.fetchFailure = {
-        series: "E",
-        objectIndex: entry.objectIndex,
-        message: fetched.message
-      };
-      return report;
-    }
-    if (fetched.kind === "missing") {
-      report.events.push({ series: "E", objectIndex: entry.objectIndex, status: "missing" });
-      previous = null;
-    } else {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const chunk = await verifyEventChunk(entry, fetched.bytes, sessionKey, previous);
-        report.verifiedChunks.push(chunk);
-        report.events.push({ series: "E", objectIndex: entry.objectIndex, status: "verified" });
-        previous = { lastSeq: chunk.lastSeq, head: chunk.head };
-      } catch (err) {
-        report.events.push(toResult("E", entry.objectIndex, err));
-        previous = null;
-      }
-    }
-    tick();
-  }
+  report.fetchFailure = await verifyEventChunks(ctx, chunkEntries);
+  if (report.fetchFailure) return report;
   if (opts.includeEvents) {
     try {
       assertEventLimit(report.verifiedChunks);
     } catch (err) {
-      report.limitError = err as ReplayVerifyError;
+      report.limitError = toLimitError(err);
       return report;
     }
   }
 
-  const videoResults = await mapWithConcurrency(
-    videoEntries,
-    WEB_APP_REPLAY_FETCH_CONCURRENCY,
-    async (entry): Promise<TObjectResult | TVerifiedVideoObject | TReplayFetchFailure> => {
-      const fetched = await fetchObject(source, "V", entry.objectIndex, opts.signal);
-      try {
-        if (fetched.kind === "failed") {
-          return { series: "V", objectIndex: entry.objectIndex, message: fetched.message };
-        }
-        if (fetched.kind === "missing") {
-          return { series: "V", objectIndex: entry.objectIndex, status: "missing" };
-        }
-        return await verifyVideoObject(entry, fetched.bytes, sessionKey);
-      } catch (err) {
-        return toResult("V", entry.objectIndex, err);
-      } finally {
-        tick();
-      }
-    }
-  );
-  for (let i = 0; i < videoResults.length; i += 1) {
-    const r = videoResults[i];
-    if ("bytes" in r) {
-      report.verifiedVideo.push(r);
-      report.video.push({ series: "V", objectIndex: r.objectIndex, status: "verified" });
-      if (opts.includeEvents)
-        report.bindings.set(r.objectIndex, checkVideoBinding(r, report.verifiedChunks));
-    } else if ("status" in r) {
-      report.video.push(r);
-    } else {
-      report.fetchFailure = r;
-      return report;
-    }
-  }
+  report.fetchFailure = await verifyVideoObjects(ctx, videoEntries, opts.includeEvents);
   return report;
 };
