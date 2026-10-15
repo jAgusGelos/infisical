@@ -330,16 +330,6 @@ export const pamWebAppCheckpointServiceFactory = ({
       throw new PamWebAppError(PamWebAppErrorCode.BadSignature, "Key certificate has expired");
     }
 
-    if (session.gatewayId) {
-      const pin = await pamWebAppSessionKeyDAL.findGatewayPin(session.gatewayId);
-      if (pin && !equalBytes(new Uint8Array(pin.recordingPublicKey), recordingPublicKey)) {
-        throw new PamWebAppError(
-          PamWebAppErrorCode.RecordingKeyMismatch,
-          `Gateway's recording key changed: expected fingerprint ${pin.fingerprint}, got ${request.fingerprint}`
-        );
-      }
-    }
-
     const existing = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
     if (existing) {
       const same =
@@ -353,16 +343,31 @@ export const pamWebAppCheckpointServiceFactory = ({
     }
 
     try {
-      await pamWebAppSessionKeyDAL.create({
-        sessionId: session.id,
-        gatewayId: session.gatewayId ?? null,
-        recordingPublicKey: Buffer.from(recordingPublicKey),
-        recordingKeyId: await keyIdHex(recordingPublicKey),
-        fingerprint: expectedFingerprint,
-        keyCert: Buffer.from(keyCertBytes),
-        keyCertSig: Buffer.from(keyCertSig),
-        sessionPublicKey: Buffer.from(cert.sessionPublicKey),
-        sessionKeyId: await keyIdHex(cert.sessionPublicKey)
+      await pamWebAppSessionKeyDAL.transaction(async (tx) => {
+        if (session.gatewayId) {
+          if (typeof tx.raw === "function") {
+            await tx.raw("select pg_advisory_xact_lock(hashtext(?))", [session.gatewayId]);
+          }
+          const pin = await pamWebAppSessionKeyDAL.findGatewayPin(session.gatewayId, tx);
+          if (pin && !equalBytes(new Uint8Array(pin.recordingPublicKey), recordingPublicKey)) {
+            throw new PamWebAppError(
+              PamWebAppErrorCode.RecordingKeyMismatch,
+              `Gateway's recording key changed: expected fingerprint ${pin.fingerprint}, got ${request.fingerprint}`
+            );
+          }
+        }
+        const data = {
+          sessionId: session.id,
+          gatewayId: session.gatewayId ?? null,
+          recordingPublicKey: Buffer.from(recordingPublicKey),
+          recordingKeyId: await keyIdHex(recordingPublicKey),
+          fingerprint: expectedFingerprint,
+          keyCert: Buffer.from(keyCertBytes),
+          keyCertSig: Buffer.from(keyCertSig),
+          sessionPublicKey: Buffer.from(cert.sessionPublicKey),
+          sessionKeyId: await keyIdHex(cert.sessionPublicKey)
+        };
+        await pamWebAppSessionKeyDAL.create(data, tx);
       });
     } catch (err) {
       const raced = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
