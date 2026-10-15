@@ -79,14 +79,11 @@ export const addWebAppTemplateIssues = (settings: TWebAppInvariantInput, ctx: z.
       message: "Recording must be enabled for templates with Web App settings"
     });
   }
-  if (
-    settings.webApp.requireObjectLock !== false &&
-    settings.recordingStorageBackend !== PamRecordingStorageBackend.AwsS3
-  ) {
+  if (settings.recordingStorageBackend !== PamRecordingStorageBackend.AwsS3) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["recordingStorageBackend"],
-      message: "Web App recordings that require Object Lock must be stored in AWS S3 (or an S3-compatible endpoint)"
+      message: "Web App recordings with Object Lock must be stored in AWS S3 (or an S3-compatible endpoint)"
     });
   }
 };
