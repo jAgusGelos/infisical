@@ -53,5 +53,37 @@ export const pamWebAppObjectDALFactory = (db: TDbClient) => {
     return row ?? null;
   };
 
-  return { ...orm, findBySessionId, findObject, insertIfAbsent };
+  // V rows whose binding event falls in an accepted E chunk.
+  const findPendingVideoInRange = async (sessionId: string, firstSeq: number, lastSeq: number, tx?: Knex) =>
+    (tx || db.replicaNode())(TableName.PamWebAppObject)
+      .where({ sessionId, series: "V", binding: "pending" })
+      .whereBetween("lastSeq", [firstSeq, lastSeq])
+      .select("*");
+
+  const findEventChunkCovering = async (sessionId: string, seq: number, tx?: Knex) =>
+    (tx || db.replicaNode())(TableName.PamWebAppObject)
+      .where({ sessionId, series: "E" })
+      .where("firstSeq", "<=", seq)
+      .where("lastSeq", ">=", seq)
+      .first();
+
+  const findEventChunksInRange = async (sessionId: string, fromSeq: number, toSeq: number, limit: number) =>
+    db
+      .replicaNode()(TableName.PamWebAppObject)
+      .where({ sessionId, series: "E" })
+      .where("firstSeq", "<=", toSeq)
+      .where("lastSeq", ">=", fromSeq)
+      .orderBy("objectIndex", "asc")
+      .limit(limit)
+      .select("*");
+
+  return {
+    ...orm,
+    findBySessionId,
+    findObject,
+    insertIfAbsent,
+    findPendingVideoInRange,
+    findEventChunkCovering,
+    findEventChunksInRange
+  };
 };

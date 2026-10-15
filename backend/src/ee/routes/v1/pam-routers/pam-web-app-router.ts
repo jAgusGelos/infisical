@@ -4,7 +4,9 @@ import { z } from "zod";
 
 import { EventType } from "@app/ee/services/audit-log/audit-log-types";
 import {
+  PAM_WEB_APP_MAX_EVENTS_SEQ_SPAN,
   PamWebAppBinding,
+  PamWebAppEventStream,
   PamWebAppObjectKind,
   PamWebAppSeries
 } from "@app/ee/services/pam-web-app/pam-web-app-checkpoint-service";
@@ -243,5 +245,75 @@ export const registerPamWebAppRouter = async (server: FastifyZodProvider) => {
         void reply.header("Cache-Control", "no-store");
         return reply.send(body);
       })
+  });
+
+  server.route({
+    method: "GET",
+    url: "/:sessionId/web-app/events",
+    config: { rateLimit: readLimit },
+    schema: {
+      operationId: "pamWebAppListEvents",
+      description:
+        "List decoded Web App recording events in a seq range, filtered by stream. Display only: integrity comes from the signed chunks",
+      tags: [ApiDocsTags.PamSessions],
+      params: SessionParams,
+      querystring: z.object({
+        fromSeq: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0).describe("First seq"),
+        toSeq: z.coerce
+          .number()
+          .int()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER)
+          .optional()
+          .describe(`Last seq, inclusive; at most fromSeq + ${PAM_WEB_APP_MAX_EVENTS_SEQ_SPAN}`),
+        streams: z
+          .string()
+          .trim()
+          .max(64)
+          .optional()
+          .transform((v, ctx) => {
+            if (!v) return Object.values(PamWebAppEventStream);
+            const parts = v.split(",").map((p) => p.trim());
+            const parsed = z.array(z.nativeEnum(PamWebAppEventStream)).min(1).max(5).safeParse(parts);
+            if (!parsed.success) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `streams must be a comma separated list of ${Object.values(PamWebAppEventStream).join(", ")}`
+              });
+              return z.NEVER;
+            }
+            return [...new Set(parsed.data)];
+          })
+          .describe("Comma separated streams: L1, L3, lifecycle, V, index (default all)")
+      }),
+      response: {
+        200: z.object({
+          events: z.array(
+            z.object({
+              seq: z.number(),
+              type: z.string(),
+              wallTimeUnixMs: z.number(),
+              monoElapsedUs: z.number(),
+              body: z.unknown()
+            })
+          )
+        }),
+        409: ErrorBody,
+        422: ErrorBody
+      }
+    },
+    onRequest: verifyAuth([AuthMode.JWT, AuthMode.IDENTITY_ACCESS_TOKEN, AuthMode.OAUTH]),
+    handler: async (req, reply) =>
+      withContractErrors(reply, () =>
+        server.services.pamWebAppCheckpoint.getEvents(
+          {
+            sessionId: req.params.sessionId,
+            fromSeq: req.query.fromSeq,
+            toSeq: req.query.toSeq ?? req.query.fromSeq + PAM_WEB_APP_MAX_EVENTS_SEQ_SPAN,
+            streams: req.query.streams
+          },
+          req.permission
+        )
+      )
   });
 };
