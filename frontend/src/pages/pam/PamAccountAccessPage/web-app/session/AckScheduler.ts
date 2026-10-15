@@ -1,8 +1,9 @@
 import type { TClock } from "./types";
 
-export const ACK_INTERVAL_MS = 100;
+// Contract 1.9 bounds the gap at 100 ms; browser timers fire late under load, so aim lower.
+export const ACK_INTERVAL_MS = 80;
 
-// Contract 1.9: ACK at least every 100 ms while chunks arrive, and immediately after a keyframe.
+// ACK while chunks arrive at most ACK_INTERVAL_MS after the previous ACK, and immediately after a keyframe.
 export class AckScheduler {
   private highestSeq: number | null = null;
 
