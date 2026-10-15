@@ -646,7 +646,14 @@ export const pamWebAppCheckpointServiceFactory = ({
         `Stored object version '${head.versionId ?? "none"}' does not match the submitted version '${request.versionId}'`
       );
     }
-    if (head.checksumSha256 !== bytesToBase64(cp.ciphertextSha256)) {
+    // Do not trust provider-reported ChecksumSHA256 here. MinIO can omit it or return
+    // metadata that does not describe the selected object version. The checkpoint is
+    // bound to the exact ciphertext, so hash the bytes we are about to accept instead.
+    const storedBytes = new Uint8Array(
+      await provider.getObject({ config, objectKey: request.objectKey, versionId: request.versionId })
+    );
+    const storedChecksum = bytesToBase64(await sha256(storedBytes));
+    if (storedChecksum !== bytesToBase64(cp.ciphertextSha256)) {
       throw new PamWebAppError(
         PamWebAppErrorCode.ChecksumMismatch,
         "Stored object checksum does not match the checkpoint ciphertextSha256"
