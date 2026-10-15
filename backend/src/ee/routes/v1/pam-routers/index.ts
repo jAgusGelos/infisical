@@ -13,6 +13,7 @@ import { registerPamProjectRouter } from "./pam-project-router";
 import { registerPamResourceRoleRouter } from "./pam-resource-role-router";
 import { registerPamSessionChunkRouter } from "./pam-session-chunk-router";
 import { registerPamSessionRouter, registerPamWebAccessRouter } from "./pam-session-router";
+import { registerPamWebAppRouter } from "./pam-web-app-router";
 
 export const registerPamRouters = async (server: FastifyZodProvider) => {
   await server.register(registerPamProjectRouter, { prefix: "/project" });
@@ -40,6 +41,7 @@ export const registerPamRouters = async (server: FastifyZodProvider) => {
     async (sessionServer) => {
       await sessionServer.register(registerPamSessionRouter);
       await sessionServer.register(registerPamSessionChunkRouter);
+      await sessionServer.register(registerPamWebAppRouter);
     },
     { prefix: "/sessions" }
   );
