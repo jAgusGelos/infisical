@@ -1,5 +1,5 @@
-// Producer side of CONTRACTS.md 6.1 and 6.7 for unit tests and the DEV fixture generator. Never imported by the app:
-// the gateway is the only real producer.
+// Producer side of the recording format for unit tests and the DEV fixture generator. Never imported by the app:
+// the gateway is the only real producer. The relative contract import keeps it runnable by tsx without path aliases.
 import {
   CHECKPOINT_SIZE,
   CheckpointKind,
@@ -94,7 +94,6 @@ export const buildEnvelope = (args: TBuildEnvelopeArgs) => {
   return b;
 };
 
-// Builds a chain of envelopes from seq 0 and returns them with their event hashes.
 export const buildChain = async (
   events: Omit<TBuildEnvelopeArgs, "seq" | "prevHash">[],
   startSeq = 0n,

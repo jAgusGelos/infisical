@@ -1,5 +1,4 @@
-// Mirrors CONTRACTS.md 6.10 (Web App playback API). Unknown fields are ignored; optional fields are the ones the
-// contract marks as additive (v1.1) or that a v1 backend may omit.
+// Unknown fields are ignored; optional fields are the ones an older backend may omit.
 
 export type TWebAppReplayBinding = "bound" | "pending" | "mismatch";
 

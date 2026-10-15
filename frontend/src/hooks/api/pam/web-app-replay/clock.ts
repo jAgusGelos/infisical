@@ -1,8 +1,8 @@
 import { TWebAppVideoEntry, TWebAppVideoMediaEntry } from "./types";
 
-// Video ms = position on the MSE timeline relative to the first media segment (CONTRACTS.md 6.10 startMs/endMs).
-// Session ms = gateway monotonic clock (envelope monoElapsedUs). Media entries carry monoStartUs since contract v1.1;
-// without it the two clocks are assumed equal.
+// Video ms is the MSE timeline position relative to the first media segment; session ms is the gateway monotonic
+// clock (envelope monoElapsedUs). Media entries without monoStartUs come from older backends, and for them the two
+// clocks are assumed equal.
 type TSegmentSpan = { startMs: number; endMs: number; monoStartMs: number; monoEndMs: number };
 
 export type TReplayClock = {
@@ -12,16 +12,26 @@ export type TReplayClock = {
   durationVideoMs: number;
 };
 
+export const isMediaEntry = (entry: TWebAppVideoEntry): entry is TWebAppVideoMediaEntry =>
+  entry.kind === "media";
+
+export const mediaSessionSpan = (entry: TWebAppVideoMediaEntry) => {
+  const fromMs = entry.monoStartUs !== undefined ? entry.monoStartUs / 1000 : entry.startMs;
+  const toMs =
+    entry.monoEndUs !== undefined ? entry.monoEndUs / 1000 : fromMs + (entry.endMs - entry.startMs);
+  return { fromMs, toMs };
+};
+
+const toSegmentSpan = (entry: TWebAppVideoMediaEntry): TSegmentSpan => {
+  const { fromMs, toMs } = mediaSessionSpan(entry);
+  return { startMs: entry.startMs, endMs: entry.endMs, monoStartMs: fromMs, monoEndMs: toMs };
+};
+
 export const createReplayClock = (entries: TWebAppVideoEntry[]): TReplayClock => {
-  const segments: TSegmentSpan[] = entries
-    .filter((e): e is TWebAppVideoMediaEntry => e.kind === "media")
+  const segments = entries
+    .filter(isMediaEntry)
     .sort((a, b) => a.startMs - b.startMs)
-    .map((e) => {
-      const monoStartMs = e.monoStartUs !== undefined ? e.monoStartUs / 1000 : e.startMs;
-      const monoEndMs =
-        e.monoEndUs !== undefined ? e.monoEndUs / 1000 : monoStartMs + (e.endMs - e.startMs);
-      return { startMs: e.startMs, endMs: e.endMs, monoStartMs, monoEndMs };
-    });
+    .map(toSegmentSpan);
 
   const videoToSessionMs = (videoMs: number) => {
     if (segments.length === 0) return videoMs;

@@ -9,6 +9,7 @@ import {
   keyIdHex,
   parseEnvelopes,
   Series,
+  seriesLetter,
   sha256,
   TCheckpoint,
   TEnvelope,
@@ -23,8 +24,9 @@ import { WEB_APP_REPLAY_MAX_EVENTS, WEB_APP_REPLAY_MAX_OBJECT_BYTES } from "./li
 import {
   TWebAppEventChunkEntry,
   TWebAppReplay,
-  TWebAppVideoEntry,
-  TWebAppVideoMediaEntry
+  TWebAppReplayBinding,
+  TWebAppReplaySeries,
+  TWebAppVideoEntry
 } from "./types";
 
 export type TReplayVerifyStep =
@@ -40,7 +42,7 @@ export class ReplayVerifyError extends Error {
   constructor(
     public step: TReplayVerifyStep,
     message: string,
-    public series?: "V" | "E",
+    public series?: TWebAppReplaySeries,
     public objectIndex?: number
   ) {
     super(message);
@@ -51,7 +53,7 @@ export class ReplayVerifyError extends Error {
 declare const verifiedBrand: unique symbol;
 
 // Only this module creates these values, so anything typed TVerifiedVideoObject passed both the checkpoint
-// signature and the plaintext hash check (CONTRACTS.md 6.10: verify before MSE).
+// signature and the plaintext hash check before it can reach a SourceBuffer.
 export type TVerifiedVideoObject = {
   readonly [verifiedBrand]: true;
   objectIndex: number;
@@ -86,7 +88,7 @@ export type TVerifiedSessionKey = {
 const fail = (
   step: TReplayVerifyStep,
   message: string,
-  series?: "V" | "E",
+  series?: TWebAppReplaySeries,
   objectIndex?: number
 ): never => {
   throw new ReplayVerifyError(step, message, series, objectIndex);
@@ -175,7 +177,7 @@ const verifyEntryCheckpoint = async (
   expectedKinds: CheckpointKind[],
   sessionKey: TVerifiedSessionKey
 ) => {
-  const letter = series === Series.V ? "V" : "E";
+  const letter = seriesLetter(series);
   let cp: TCheckpoint;
   try {
     cp = await verifyCheckpoint(
@@ -205,7 +207,7 @@ const verifyEntryCheckpoint = async (
 const verifyPlaintext = async (
   cp: TCheckpoint,
   plaintext: Uint8Array,
-  series: "V" | "E",
+  series: TWebAppReplaySeries,
   objectIndex: number
 ) => {
   if (plaintext.length > WEB_APP_REPLAY_MAX_OBJECT_BYTES) {
@@ -291,9 +293,9 @@ export const verifyEventChunk = async (
 
 type TVideoEventBody = { objectIndex: number; sha256: string };
 
-export type TBindingResult = "bound" | "pending" | "mismatch";
+export type TBindingResult = TWebAppReplayBinding;
 
-// CONTRACTS.md 6.7: the V checkpoint's lastSeq names the v_init/v_segment event that carries its hash.
+// The V checkpoint's lastSeq names the v_init/v_segment event that carries the object's hash.
 export const checkVideoBinding = (
   video: TVerifiedVideoObject,
   chunks: TVerifiedEventChunk[]
@@ -325,6 +327,3 @@ export const assertEventLimit = (chunks: TVerifiedEventChunk[]) => {
     fail("limits", "recording has more events than the viewer can show");
   }
 };
-
-export const isMediaEntry = (entry: TWebAppVideoEntry): entry is TWebAppVideoMediaEntry =>
-  entry.kind === "media";
