@@ -40,6 +40,7 @@ import {
 } from "./contract";
 import { TPamWebAppObjectDALFactory, TPamWebAppSessionKeyDALFactory } from "./pam-web-app-dal";
 import { PamWebAppError, PamWebAppErrorCode } from "./pam-web-app-errors";
+import type { TPamWebAppManifestServiceFactory } from "./pam-web-app-manifest-service";
 
 export const PAM_WEB_APP_MAX_OBJECT_BYTES = 64 * 1024 * 1024;
 export const PAM_WEB_APP_MAX_EVENTS_SEQ_SPAN = 10_000;
@@ -205,7 +206,19 @@ type TPamWebAppCheckpointServiceFactoryDep = {
   resolveStorage: (accountId: string) => Promise<TPamWebAppStorage | null>;
   getSessionKey: (session: TWebAppSession) => Promise<Uint8Array>;
   assertSessionViewAccess: (session: TWebAppSession, actor: OrgServiceActor) => Promise<void>;
+  pamWebAppManifestService?: Pick<TPamWebAppManifestServiceFactory, "signManifest" | "getManifest">;
+  pamAccountDAL?: { findById: (id: string) => Promise<{ folderId?: string | null } | undefined> };
   now?: () => number;
+};
+
+type TCheckpointResult = {
+  accepted: true;
+  duplicate: boolean;
+  checkpoint: TCheckpoint;
+  accountId?: string | null;
+  folderId?: string | null;
+  signerKeyId?: string;
+  fingerprint?: string;
 };
 
 export type TPamWebAppCheckpointServiceFactory = ReturnType<typeof pamWebAppCheckpointServiceFactory>;
@@ -219,6 +232,8 @@ export const pamWebAppCheckpointServiceFactory = ({
   resolveStorage,
   getSessionKey,
   assertSessionViewAccess,
+  pamWebAppManifestService,
+  pamAccountDAL,
   now = Date.now
 }: TPamWebAppCheckpointServiceFactoryDep) => {
   const getWebAppSession = async (sessionId: string) => {
@@ -258,6 +273,46 @@ export const pamWebAppCheckpointServiceFactory = ({
       );
     }
     return storage;
+  };
+
+  const signManifestIfComplete = async (session: TWebAppSession) => {
+    if (!pamWebAppManifestService) return;
+    const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+    if (keys?.finalSeq === null || keys?.finalSeq === undefined) return;
+    const objects = await pamWebAppObjectDAL.findBySessionId(session.id);
+    const covering = objects.find(
+      (object) =>
+        object.series === PamWebAppSeries.E &&
+        Number(object.firstSeq) <= Number(keys.finalSeq) &&
+        Number(object.lastSeq) >= Number(keys.finalSeq)
+    );
+    if (!covering) return;
+    try {
+      await pamWebAppManifestService.signManifest({
+        sessionId: session.id,
+        projectId: session.projectId,
+        recordingKeyFingerprint: keys.fingerprint,
+        finalSeq: Number(keys.finalSeq),
+        endReason: keys.endReason ?? null,
+        objects: objects.map((object) => ({
+          series: object.series,
+          objectIndex: object.objectIndex,
+          kind: object.kind,
+          firstSeq: Number(object.firstSeq),
+          lastSeq: Number(object.lastSeq),
+          objectKey: object.objectKey,
+          versionId: object.versionId,
+          binding: object.binding,
+          checkpoint: object.checkpoint
+        })),
+        hasLoss: false
+      });
+    } catch (err) {
+      logger.error(
+        { sessionId: session.id, error: err },
+        `Web App manifest signing deferred [sessionId=${session.id}]`
+      );
+    }
   };
 
   const open = async (
@@ -563,7 +618,7 @@ export const pamWebAppCheckpointServiceFactory = ({
   const submitCheckpoint = async (
     request: TGatewayRequest & { checkpoint: string; signature: string; objectKey: string; versionId?: string },
     actor: OrgServiceActor
-  ) => {
+  ): Promise<TCheckpointResult> => {
     const session = await getGatewaySession(request, actor);
 
     const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
@@ -601,7 +656,15 @@ export const pamWebAppCheckpointServiceFactory = ({
         equalBytes(new Uint8Array(row.checkpoint), checkpointBytes) &&
         equalBytes(new Uint8Array(row.signature), signature) &&
         (row.versionId ?? null) === (request.versionId ?? null);
-      if (same) return { accepted: true as const, duplicate: true as const, checkpoint: cp };
+      if (same)
+        return {
+          accepted: true as const,
+          duplicate: true as const,
+          checkpoint: cp,
+          accountId: session.accountId,
+          signerKeyId: keys.sessionKeyId,
+          fingerprint: keys.fingerprint
+        };
       throw new PamWebAppError(
         PamWebAppErrorCode.Conflict,
         `Object ${series}/${cp.objectIndex} already has a different checkpoint`
@@ -721,7 +784,29 @@ export const pamWebAppCheckpointServiceFactory = ({
       { sessionId: session.id, series, objectIndex: cp.objectIndex },
       `Web App checkpoint accepted [sessionId=${session.id}] [series=${series}] [objectIndex=${cp.objectIndex}]`
     );
-    return { accepted: true as const, duplicate: false as const, checkpoint: cp };
+    await signManifestIfComplete(session);
+    const account = session.accountId && pamAccountDAL ? await pamAccountDAL.findById(session.accountId) : undefined;
+    return {
+      accepted: true as const,
+      duplicate: false as const,
+      checkpoint: cp,
+      accountId: session.accountId,
+      folderId: account?.folderId,
+      signerKeyId: keys.sessionKeyId,
+      fingerprint: keys.fingerprint
+    };
+  };
+
+  const end = async (request: TGatewayRequest & { finalSeq: number; reason: string }, actor: OrgServiceActor) => {
+    const session = await getGatewaySession(request, actor);
+    const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+    if (!keys) throw new PamWebAppError(PamWebAppErrorCode.UnknownKey, "Open the Web App recording before ending it");
+    await pamWebAppSessionKeyDAL.update(
+      { sessionId: session.id },
+      { finalSeq: request.finalSeq, endReason: request.reason.trim() || null }
+    );
+    await signManifestIfComplete(session);
+    return { ok: true as const };
   };
 
   const getViewableSession = async (sessionId: string, actor: OrgServiceActor) => {
@@ -792,7 +877,7 @@ export const pamWebAppCheckpointServiceFactory = ({
           .filter((o) => o.series === PamWebAppSeries.E)
           .map((o) => ({ ...common(o), firstSeq: Number(o.firstSeq), lastSeq: Number(o.lastSeq) }))
       },
-      manifest: null
+      manifest: pamWebAppManifestService ? await pamWebAppManifestService.getManifest(session.id) : null
     };
   };
 
@@ -892,7 +977,7 @@ export const pamWebAppCheckpointServiceFactory = ({
     return { events };
   };
 
-  return { open, presign, submitCheckpoint, getReplay, getObject, getEvents };
+  return { open, presign, submitCheckpoint, end, getReplay, getObject, getEvents };
 };
 
 export const describeCheckpointForAudit = (cp: TCheckpoint) => ({

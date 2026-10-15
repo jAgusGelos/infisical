@@ -3,6 +3,7 @@ import RE2 from "re2";
 import { z } from "zod";
 
 import { EventType } from "@app/ee/services/audit-log/audit-log-types";
+import { Series } from "@app/ee/services/pam-web-app/contract";
 import {
   PAM_WEB_APP_MAX_EVENTS_SEQ_SPAN,
   PamWebAppBinding,
@@ -129,6 +130,33 @@ export const registerPamWebAppRouter = async (server: FastifyZodProvider) => {
 
   server.route({
     method: "POST",
+    url: "/:sessionId/web-app/end",
+    config: { rateLimit: writeLimit },
+    schema: {
+      operationId: "pamWebAppEndRecording",
+      description: "Set the final sequence and close reason for a Web App recording",
+      tags: [ApiDocsTags.PamSessions],
+      params: SessionParams,
+      body: z.object({
+        finalSeq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+        reason: z.string().trim().min(1).max(128)
+      }),
+      response: { 200: z.object({ ok: z.literal(true) }), 409: ErrorBody, 422: ErrorBody }
+    },
+    onRequest: verifyAuth([AuthMode.GATEWAY_ACCESS_TOKEN]),
+    handler: async (req, reply) => {
+      const uploadToken = await getUploadToken(req);
+      return withContractErrors(reply, () =>
+        server.services.pamWebAppCheckpoint.end(
+          { sessionId: req.params.sessionId, uploadToken, ...req.body },
+          req.permission
+        )
+      );
+    }
+  });
+
+  server.route({
+    method: "POST",
     url: "/:sessionId/web-app/objects/presign",
     config: { rateLimit: writeLimit },
     schema: {
@@ -197,6 +225,26 @@ export const registerPamWebAppRouter = async (server: FastifyZodProvider) => {
           req.permission
         );
         if (result.duplicate) return reply.status(200).send({ accepted: true, duplicate: true });
+        await server.services.auditLog.createAuditLog({
+          ...req.auditLogInfo,
+          orgId: req.permission.orgId,
+          projectId: req.internalPamProjectId,
+          event: {
+            type: EventType.PAM_WEB_APP_CHECKPOINT,
+            metadata: {
+              sessionId: req.params.sessionId,
+              accountId: result.accountId ?? undefined,
+              folderId: result.folderId ?? undefined,
+              series: result.checkpoint.series === Series.E ? "E" : "V",
+              objectIndex: result.checkpoint.objectIndex,
+              firstSeq: Number(result.checkpoint.firstSeq),
+              lastSeq: Number(result.checkpoint.lastSeq),
+              chainHead: Buffer.from(result.checkpoint.chainHead).toString("hex"),
+              signerKeyId: Buffer.from(result.checkpoint.signerKeyId).toString("hex"),
+              fingerprint: result.fingerprint ?? ""
+            }
+          }
+        });
         return reply.status(201).send({ accepted: true });
       });
     }

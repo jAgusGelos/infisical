@@ -146,6 +146,11 @@ import { PAM_RECORDING_STORAGE_FACTORY_MAP } from "@app/ee/services/pam-session-
 import { pamWebAccessServiceFactory } from "@app/ee/services/pam-web-access/pam-web-access-service";
 import { pamWebAppCheckpointServiceFactory } from "@app/ee/services/pam-web-app/pam-web-app-checkpoint-service";
 import { pamWebAppObjectDALFactory, pamWebAppSessionKeyDALFactory } from "@app/ee/services/pam-web-app/pam-web-app-dal";
+import { pamWebAppManifestDALFactory } from "@app/ee/services/pam-web-app/pam-web-app-manifest-dal";
+import {
+  PAM_WEB_APP_MANIFEST_KEY_NAME,
+  pamWebAppManifestServiceFactory
+} from "@app/ee/services/pam-web-app/pam-web-app-manifest-service";
 import { permissionDALFactory } from "@app/ee/services/permission/permission-dal";
 import { permissionServiceFactory } from "@app/ee/services/permission/permission-service";
 import { pitServiceFactory } from "@app/ee/services/pit/pit-service";
@@ -2213,6 +2218,20 @@ export const registerRoutes = async (
   const pamSessionEventChunkDAL = pamSessionEventChunkDALFactory(db);
   const pamWebAppSessionKeyDAL = pamWebAppSessionKeyDALFactory(db);
   const pamWebAppObjectDAL = pamWebAppObjectDALFactory(db);
+  const pamWebAppManifestDAL = pamWebAppManifestDALFactory(db);
+  const pamWebAppManifestService = pamWebAppManifestServiceFactory({
+    pamWebAppManifestDAL,
+    kmsService,
+    findManifestKeyId: async (projectId) => {
+      const key = await kmsDAL.findOne({ name: PAM_WEB_APP_MANIFEST_KEY_NAME, projectId, isReserved: true });
+      return key?.id ?? null;
+    },
+    getProjectOrgId: async (projectId) => {
+      const project = await projectDAL.findById(projectId);
+      if (!project) throw new NotFoundError({ message: `Project '${projectId}' not found` });
+      return project.orgId;
+    }
+  });
 
   // Wired after pamSessionDAL/gatewayV2Service: narrowing a member's access has to close the PAM
   // sessions that access was holding open.
@@ -4100,7 +4119,9 @@ export const registerRoutes = async (
         kmsService
       });
     },
-    assertSessionViewAccess: pamSessionChunkService.checkSessionViewAccess
+    assertSessionViewAccess: pamSessionChunkService.checkSessionViewAccess,
+    pamWebAppManifestService,
+    pamAccountDAL
   });
 
   const pamWebAccessService = pamWebAccessServiceFactory({
