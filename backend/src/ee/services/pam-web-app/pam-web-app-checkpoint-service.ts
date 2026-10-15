@@ -186,7 +186,10 @@ export type TPamWebAppStorage = {
 };
 
 type TPamWebAppCheckpointServiceFactoryDep = {
-  pamSessionDAL: { findById: (id: string) => Promise<TWebAppSession | undefined> };
+  pamSessionDAL: {
+    findById: (id: string) => Promise<TWebAppSession | undefined>;
+    endSessionById?: (id: string) => Promise<TWebAppSession | undefined>;
+  };
   pamWebAppSessionKeyDAL: Pick<
     TPamWebAppSessionKeyDALFactory,
     "findBySessionId" | "findBySessionIdForUpdate" | "findGatewayPin" | "create" | "update" | "transaction"
@@ -316,7 +319,10 @@ export const pamWebAppCheckpointServiceFactory = ({
     try {
       cert = await verifyKeyCert(recordingPublicKey, keyCertBytes, keyCertSig);
     } catch (err) {
-      logger.warn({ sessionId: session.id }, `Web App key cert rejected [sessionId=${session.id}]`);
+      logger.warn(
+        { sessionId: session.id, reason: err instanceof Error ? err.message : String(err) },
+        `Web App key cert rejected [sessionId=${session.id}]`
+      );
       throw new PamWebAppError(PamWebAppErrorCode.BadSignature, `Key certificate rejected: ${(err as Error).message}`);
     }
     if (!equalBytes(cert.sessionId, uuidToBytes(session.id))) {
@@ -513,6 +519,16 @@ export const pamWebAppCheckpointServiceFactory = ({
     try {
       plaintext = await openObject(sessionKey, stored, aad);
     } catch {
+      logger.warn(
+        {
+          sessionId: session.id,
+          projectId: session.projectId,
+          series: ref.series,
+          objectIndex: ref.objectIndex,
+          aad: bytesToHex(aad)
+        },
+        `Web App object decryption failed [sessionId=${session.id}] [series=${ref.series}] [objectIndex=${ref.objectIndex}]`
+      );
       throw new PamWebAppError(
         PamWebAppErrorCode.ChecksumMismatch,
         `Object ${ref.series}/${ref.objectIndex} failed to decrypt`
@@ -646,7 +662,14 @@ export const pamWebAppCheckpointServiceFactory = ({
         `Stored object version '${head.versionId ?? "none"}' does not match the submitted version '${request.versionId}'`
       );
     }
-    if (head.checksumSha256 !== bytesToBase64(cp.ciphertextSha256)) {
+    // Do not trust provider-reported ChecksumSHA256 here. MinIO can omit it or return
+    // metadata that does not describe the selected object version. The checkpoint is
+    // bound to the exact ciphertext, so hash the bytes we are about to accept instead.
+    const storedBytes = new Uint8Array(
+      await provider.getObject({ config, objectKey: request.objectKey, versionId: request.versionId })
+    );
+    const storedChecksum = bytesToBase64(await sha256(storedBytes));
+    if (storedChecksum !== bytesToBase64(cp.ciphertextSha256)) {
       throw new PamWebAppError(
         PamWebAppErrorCode.ChecksumMismatch,
         "Stored object checksum does not match the checkpoint ciphertextSha256"
@@ -897,6 +920,13 @@ export const pamWebAppCheckpointServiceFactory = ({
         tx
       );
     });
+
+    // The recording end marker is also the gateway's authoritative signal that
+    // the PAM session is over. Persist it on pam_sessions so the normal session
+    // list and access checks do not leave a completed Web App session active.
+    // Keep endReason on the recording key (the session table has no reason
+    // column), while endedAt/status are recorded by the session DAL.
+    await pamSessionDAL.endSessionById?.(session.id);
     await signManifestIfComplete(session);
     return { ok: true as const };
   };
