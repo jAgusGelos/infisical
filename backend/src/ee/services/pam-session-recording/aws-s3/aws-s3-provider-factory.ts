@@ -51,7 +51,7 @@ export const buildPamRecordingS3Client = async (
   }
   return new S3Client({
     region: config.region,
-    useFipsEndpoint: crypto.isFipsModeEnabled(),
+    useFipsEndpoint: config.endpoint ? false : crypto.isFipsModeEnabled(),
     sha256: CustomAWSHasher,
     credentials: config.awsCredentials,
     requestHandler: AWS_REQUEST_TIMEOUTS,
