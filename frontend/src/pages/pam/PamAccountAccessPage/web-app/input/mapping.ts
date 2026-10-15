@@ -45,3 +45,8 @@ export const normalizeWheel = (
   else if (event.deltaMode === DOM_DELTA_PAGE) factor = pageHeightPx;
   return { dx: Math.round(event.deltaX * factor), dy: Math.round(event.deltaY * factor) };
 };
+
+type TShortcutSource = Pick<KeyboardEvent, "code" | "ctrlKey" | "metaKey" | "altKey">;
+
+export const isPasteShortcut = (event: TShortcutSource) =>
+  (event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyV";
