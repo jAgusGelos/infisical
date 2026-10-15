@@ -4,8 +4,10 @@
 //
 //   node scripts/pam-web-app-mock-stream.mjs [--port 7104] [--input <video file>] [--self-check]
 //
-// Then, in the browser console of a dev build (`npm run dev`):
-//   localStorage.setItem("pam-web-app:mock-ws-url", "ws://127.0.0.1:7104")
+// The app CSP only allows same-origin WebSockets, so proxy a path of the dev server to the mock, for example in a
+// local (uncommitted) vite config: server.proxy["/pam-web-app-mock"] = { target: "ws://127.0.0.1:7104", ws: true }.
+// Then, in the browser console of the dev build:
+//   localStorage.setItem("pam-web-app:mock-ws-url", "/pam-web-app-mock")
 // and open any PAM account's access page. Remove the key to go back to the real flow.
 //
 // The video is re-encoded once with ffmpeg into H.264 Annex B (keyint 30, AUD NALs, SPS/PPS before every IDR), so

@@ -10,6 +10,7 @@ import {
   type TViewerHello
 } from "@app/lib/pam-web-app/contract";
 
+import { ACK_INTERVAL_MS } from "./AckScheduler";
 import { KEYFRAME_REQUEST_INTERVAL_MS } from "./KeyframeRequester";
 import {
   chunkFrame,
@@ -135,16 +136,17 @@ describe("WebAppSessionClient", () => {
       socket.sent.filter((f) => f.type === FrameType.Ack).map((f) => decodeAck(f.payload));
     expect(acks()).toEqual([{ ackSeq: 5, decodeQueue: 3 }]);
 
-    clock.advance(33);
+    clock.advance(30);
     client.handleMessage(chunkFrame(6, false));
-    clock.advance(33);
+    clock.advance(30);
     client.handleMessage(chunkFrame(7, false));
     expect(acks()).toHaveLength(1);
-    clock.advance(33);
+    clock.advance(ACK_INTERVAL_MS - 61);
     expect(acks()).toHaveLength(1);
     clock.advance(1);
     expect(acks()).toHaveLength(2);
     expect(acks()[1].ackSeq).toBe(7);
+    expect(ACK_INTERVAL_MS).toBeLessThanOrEqual(100);
 
     clock.advance(500);
     expect(acks()).toHaveLength(2);
