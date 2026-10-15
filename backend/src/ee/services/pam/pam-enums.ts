@@ -51,7 +51,8 @@ export enum PamSessionStatus {
 
 export enum PamSessionEndReason {
   Completed = "completed",
-  Expired = "expired"
+  Expired = "expired",
+  ViewerLost = "viewer_lost"
 }
 
 export enum PamSnowflakeAuthMethod {

@@ -4138,7 +4138,8 @@ export const registerRoutes = async (
     mfaSessionService,
     orgDAL,
     membershipDAL,
-    telemetryService
+    telemetryService,
+    keyStore
   });
 
   const certificateV3Service = certificateV3ServiceFactory({

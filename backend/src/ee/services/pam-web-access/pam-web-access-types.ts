@@ -42,6 +42,7 @@ export const DEFAULT_WEB_SESSION_DURATION_MS = 60 * 60 * 1000;
 export const MAX_WEB_SESSIONS_PER_USER = 5;
 export const WS_PING_INTERVAL_MS = 30000;
 export const WS_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+export const WEB_APP_RECONNECT_GRACE_MS = 60 * 1000;
 
 export type TEarlyBufferedMsg = { data: Buffer; isBinary: boolean };
 
