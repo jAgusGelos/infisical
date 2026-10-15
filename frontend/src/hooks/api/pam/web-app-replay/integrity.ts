@@ -1,6 +1,6 @@
 import { TReplayTimeline } from "./events";
 import { TObjectResult, TReplayVerificationReport, TVerifyProgress } from "./report";
-import { TWebAppReplay } from "./types";
+import { TWebAppReplay, TWebAppReplaySeries } from "./types";
 
 export type TIntegrityState =
   | "tampered"
@@ -16,8 +16,10 @@ export type TIntegrityChip = {
   detail: string;
 };
 
-const seriesName = (r: { series: "V" | "E" }) =>
-  r.series === "V" ? "video object" : "event chunk";
+type TUnexplainedGap = { message: string; objectIndex?: number };
+
+const seriesName = (series: TWebAppReplaySeries) =>
+  series === "V" ? "video object" : "event chunk";
 
 const firstIndexGap = (indices: number[]) => {
   const sorted = [...indices].sort((a, b) => a - b);
@@ -25,7 +27,77 @@ const firstIndexGap = (indices: number[]) => {
   return null;
 };
 
-// Priority: Tampered > Gap > Incomplete > Verifying > Verified > Not verified (CONTRACTS.md 6.10 chip mapping).
+const pendingChip = (progress?: TVerifyProgress | null): TIntegrityChip =>
+  progress
+    ? {
+        state: "verifying",
+        label: `Verifying ${progress.done}/${progress.total}`,
+        detail: "Checking signatures, hashes and the event chain in this browser."
+      }
+    : { state: "not_verified", label: "Not verified", detail: "Verification has not run." };
+
+const unverifiableReason = (report: TReplayVerificationReport) => {
+  if (!report.ed25519Supported) return "This browser cannot check Ed25519 signatures.";
+  if (report.limitError) return report.limitError.message;
+  if (report.fetchFailure) return report.fetchFailure.message;
+  if (!report.includesEvents) return "The event chain was not checked.";
+  return null;
+};
+
+const tamperDetail = (report: TReplayVerificationReport, results: TObjectResult[]) => {
+  if (report.keyCertError) return `Session key certificate: ${report.keyCertError.message}`;
+  const tampered = results.find((r) => r.status === "tampered");
+  if (tampered) {
+    return `${seriesName(tampered.series)} ${tampered.objectIndex}: ${tampered.message ?? "verification failed"}`;
+  }
+  if ([...report.bindings.values()].includes("mismatch")) {
+    return "A video object does not match its event in the chain.";
+  }
+  return null;
+};
+
+const findUnexplainedGap = (
+  report: TReplayVerificationReport,
+  results: TObjectResult[],
+  timeline: TReplayTimeline | null,
+  isEnded: boolean
+): TUnexplainedGap | null => {
+  const missing = results.find((r) => r.status === "missing");
+  if (missing) {
+    return {
+      objectIndex: missing.objectIndex,
+      message: `${seriesName(missing.series)} ${missing.objectIndex} is missing`
+    };
+  }
+  const vGap = firstIndexGap(report.video.map((r) => r.objectIndex));
+  if (vGap !== null) return { objectIndex: vGap, message: `video object ${vGap} is not listed` };
+  const eGap = firstIndexGap(report.events.map((r) => r.objectIndex));
+  if (eGap !== null) return { objectIndex: eGap, message: `event chunk ${eGap} is not listed` };
+  const pending = isEnded ? [...report.bindings].find(([, b]) => b === "pending") : undefined;
+  if (pending) {
+    return {
+      objectIndex: pending[0],
+      message: `video object ${pending[0]} has no event in the chain`
+    };
+  }
+  const end = timeline?.sessionEnd ?? null;
+  if (!end) return isEnded ? { message: "the session end record is missing" } : null;
+  if (end.vObjects > report.video.length) {
+    return {
+      objectIndex: report.video.length,
+      message: `video object ${report.video.length} is missing`
+    };
+  }
+  if (end.eChunks > report.events.length) {
+    return {
+      objectIndex: report.events.length,
+      message: `event chunk ${report.events.length} is missing`
+    };
+  }
+  return null;
+};
+
+// Priority: Tampered > Gap > Incomplete > Verified; a report that cannot be trusted at all is Not verified.
 export const deriveIntegrity = ({
   replay,
   report,
@@ -37,67 +109,21 @@ export const deriveIntegrity = ({
   timeline: TReplayTimeline | null;
   progress?: TVerifyProgress | null;
 }): TIntegrityChip => {
-  if (!report) {
-    if (progress) {
-      return {
-        state: "verifying",
-        label: `Verifying ${progress.done}/${progress.total}`,
-        detail: "Checking signatures, hashes and the event chain in this browser."
-      };
-    }
-    return { state: "not_verified", label: "Not verified", detail: "Verification has not run." };
-  }
-  if (!report.ed25519Supported) {
-    return {
-      state: "not_verified",
-      label: "Not verified",
-      detail: "This browser cannot check Ed25519 signatures."
-    };
-  }
-  if (report.limitError || report.fetchFailure || !report.includesEvents) {
-    return {
-      state: "not_verified",
-      label: "Not verified",
-      detail:
-        report.limitError?.message ??
-        report.fetchFailure?.message ??
-        "The event chain was not checked."
-    };
-  }
+  if (!report) return pendingChip(progress);
+
+  const unverifiable = unverifiableReason(report);
+  if (unverifiable) return { state: "not_verified", label: "Not verified", detail: unverifiable };
 
   const results: TObjectResult[] = [...report.video, ...report.events];
-  const tampered = results.find((r) => r.status === "tampered");
-  const mismatch = [...report.bindings].find(([, b]) => b === "mismatch");
-  if (report.keyCertError || tampered || mismatch) {
-    let detail = "A video object does not match its event in the chain.";
-    if (report.keyCertError) detail = `Session key certificate: ${report.keyCertError.message}`;
-    else if (tampered)
-      detail = `${seriesName(tampered)} ${tampered.objectIndex}: ${tampered.message ?? "verification failed"}`;
-    return { state: "tampered", label: "Tampered", detail };
-  }
+  const tamper = tamperDetail(report, results);
+  if (tamper) return { state: "tampered", label: "Tampered", detail: tamper };
 
-  const isEnded = replay?.status !== "active";
-  const missing = results.find((r) => r.status === "missing");
-  const vGap = firstIndexGap(report.video.map((r) => r.objectIndex));
-  const eGap = firstIndexGap(report.events.map((r) => r.objectIndex));
-  const end = timeline?.sessionEnd ?? null;
-  const pending = isEnded ? [...report.bindings].find(([, b]) => b === "pending") : undefined;
-  let gap: string | null = null;
-  if (missing) gap = `${seriesName(missing)} ${missing.objectIndex} is missing`;
-  else if (vGap !== null) gap = `video object ${vGap} is not listed`;
-  else if (eGap !== null) gap = `event chunk ${eGap} is not listed`;
-  else if (pending) gap = `video object ${pending[0]} has no event in the chain`;
-  else if (isEnded && !end) gap = "the session end record is missing";
-  else if (end && end.vObjects > report.video.length)
-    gap = `video object ${report.video.length} is missing`;
-  else if (end && end.eChunks > report.events.length)
-    gap = `event chunk ${report.events.length} is missing`;
+  const gap = findUnexplainedGap(report, results, timeline, replay?.status !== "active");
   if (gap) {
-    const idx = /(\d+)/.exec(gap)?.[1];
     return {
       state: "gap",
-      label: idx ? `Gap · chunk ${idx}` : "Gap",
-      detail: `Unexplained gap: ${gap}.`
+      label: gap.objectIndex !== undefined ? `Gap · chunk ${gap.objectIndex}` : "Gap",
+      detail: `Unexplained gap: ${gap.message}.`
     };
   }
 
