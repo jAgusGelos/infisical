@@ -1,0 +1,121 @@
+import type { TVideoConfig } from "@app/lib/pam-web-app/contract";
+
+import type { TLiveChunk, TLiveDecoderPort } from "../session/types";
+
+export const MAX_DECODE_QUEUE = 8;
+
+type TDecoderLike = Pick<
+  VideoDecoder,
+  "configure" | "decode" | "reset" | "close" | "decodeQueueSize" | "state"
+>;
+
+export type TDecoderFactory = {
+  createDecoder: (init: VideoDecoderInit) => TDecoderLike;
+  createChunk: (init: EncodedVideoChunkInit) => EncodedVideoChunk;
+};
+
+export const browserDecoderFactory: TDecoderFactory = {
+  createDecoder: (init) => new VideoDecoder(init),
+  createChunk: (init) => new EncodedVideoChunk(init)
+};
+
+type Options = {
+  onFrame: (frame: VideoFrame) => void;
+  onNeedKeyframe: () => void;
+  onError?: (error: Error) => void;
+  factory?: TDecoderFactory;
+};
+
+export const toDecoderConfig = (config: TVideoConfig): VideoDecoderConfig => ({
+  // Used verbatim: the contract forbids hardcoding a codec string. H.264 is Annex B, so no `description`.
+  codec: config.codec,
+  codedWidth: config.width,
+  codedHeight: config.height,
+  optimizeForLatency: true
+});
+
+// Wraps WebCodecs for a live stream: paints on output, drops deltas it cannot use, and recovers on errors by
+// reconfiguring and waiting for the next keyframe.
+export class LiveDecoder implements TLiveDecoderPort {
+  private decoder: TDecoderLike | null = null;
+
+  private config: TVideoConfig | null = null;
+
+  private waitingForKeyframe = true;
+
+  private closed = false;
+
+  private readonly factory: TDecoderFactory;
+
+  constructor(private readonly options: Options) {
+    this.factory = options.factory ?? browserDecoderFactory;
+  }
+
+  get decodeQueueSize() {
+    return this.decoder?.decodeQueueSize ?? 0;
+  }
+
+  configure(config: TVideoConfig) {
+    if (this.closed) return;
+    this.config = config;
+    this.ensureDecoder().configure(toDecoderConfig(config));
+    this.waitingForKeyframe = true;
+  }
+
+  decode(chunk: TLiveChunk): boolean {
+    if (this.closed || !this.config || !this.decoder) return false;
+    if (this.waitingForKeyframe && !chunk.keyframe) return false;
+    if (!chunk.keyframe && this.decoder.decodeQueueSize > MAX_DECODE_QUEUE) {
+      this.waitingForKeyframe = true;
+      this.options.onNeedKeyframe();
+      return false;
+    }
+    try {
+      this.decoder.decode(
+        this.factory.createChunk({
+          type: chunk.keyframe ? "key" : "delta",
+          timestamp: Number(chunk.timestampUs),
+          data: chunk.data
+        })
+      );
+    } catch (err) {
+      this.recover(err as Error);
+      return false;
+    }
+    if (chunk.keyframe) this.waitingForKeyframe = false;
+    return true;
+  }
+
+  close() {
+    this.closed = true;
+    if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
+    this.decoder = null;
+  }
+
+  private ensureDecoder() {
+    if (!this.decoder || this.decoder.state === "closed") {
+      this.decoder = this.factory.createDecoder({
+        output: (frame) => {
+          if (this.closed) {
+            frame.close();
+            return;
+          }
+          this.options.onFrame(frame);
+        },
+        error: (error) => this.recover(error)
+      });
+    }
+    return this.decoder;
+  }
+
+  // A WebCodecs error closes the decoder, so recovery builds a new one from the last config.
+  private recover(error: Error) {
+    if (this.closed) return;
+    this.options.onError?.(error);
+    if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
+    this.decoder = null;
+    this.waitingForKeyframe = true;
+    if (this.config) this.ensureDecoder().configure(toDecoderConfig(this.config));
+    this.options.onNeedKeyframe();
+  }
+}
