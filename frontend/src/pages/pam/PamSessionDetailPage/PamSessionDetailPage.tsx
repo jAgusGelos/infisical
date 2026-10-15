@@ -1,29 +1,54 @@
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Helmet } from "react-helmet";
 import { Link, useParams, useSearch } from "@tanstack/react-router";
-import { PauseIcon, PlayIcon, Video } from "lucide-react";
+import { format } from "date-fns";
 
+import { createNotification } from "@app/components/notifications";
 import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
   Badge,
   Button,
-  Card,
-  CardContent,
   Empty,
   EmptyContent,
   EmptyDescription,
   EmptyHeader,
-  EmptyTitle,
-  Skeleton
+  EmptyTitle
 } from "@app/components/v3";
-import { PageHeader } from "@app/components/v3/platform";
 import { PamAccountType, useGetPamSessionById } from "@app/hooks/api/pam";
-import { useVerifiedWebAppReplay } from "@app/hooks/api/pam/web-app-replay";
-import { ProjectType } from "@app/hooks/api/projects/types";
+import {
+  buildReplayTimeline,
+  createReplayClock,
+  deriveIntegrity,
+  formatSessionTime,
+  TIntegrityState,
+  useVerifiedWebAppReplay
+} from "@app/hooks/api/pam/web-app-replay";
 
-import { MseVideoPlayer, TMseVideoPlayerHandle } from "./components/MseVideoPlayer";
+import { capitalize, formatDuration, STATUS_BADGE } from "../PamSessionsPage/constants";
+import { MetadataStrip, TMetadataItem } from "./components/MetadataStrip";
+import { ReplayHeader, TIntegrityChipView } from "./components/ReplayHeader";
+import {
+  IntegrityIssueBanner,
+  ReplayEmptyState,
+  ReplayErrorState,
+  ReplayLoadingState,
+  TReplayErrorDetails
+} from "./components/ReplayStates";
+import { ReplayWorkspace } from "./components/ReplayWorkspace";
 
 const ROUTE_ID =
   "/_authenticate/_inject-org-details/_org-layout/organizations/$orgId/pam/_pam-layout/sessions/$sessionId" as const;
+
+const CHIP_VARIANT: Record<TIntegrityState, TIntegrityChipView["variant"]> = {
+  verified: "success",
+  incomplete: "warning",
+  gap: "warning",
+  tampered: "danger",
+  verifying: "neutral",
+  not_verified: "neutral"
+};
 
 export const PamSessionDetailPage = () => {
   const { orgId, sessionId } = useParams({ from: ROUTE_ID });
@@ -38,17 +63,35 @@ export const PamSessionDetailPage = () => {
   const { replay, state, retry } = useVerifiedWebAppReplay({
     sessionId: isWebApp ? sessionId : "",
     fixtureVariant,
-    includeEvents: false
+    includeEvents: true
   });
-
-  const playerRef = useRef<TMseVideoPlayerHandle>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const playheadRef = useRef(search.t !== undefined ? search.t * 1000 : 0);
+  const [copyLabelMs, setCopyLabelMs] = useState(playheadRef.current);
 
   const report = state.phase === "done" ? state.report : null;
-  const verifiedVideo = useMemo(() => report?.verifiedVideo ?? [], [report]);
+  const progress = state.phase === "verifying" ? state.progress : null;
+  const timeline = useMemo(
+    () => (report ? buildReplayTimeline(report.verifiedChunks) : null),
+    [report]
+  );
+  const clock = useMemo(() => createReplayClock(replay?.video.objects ?? []), [replay]);
+  const integrity = deriveIntegrity({ replay, report, timeline, progress });
 
-  const title = session?.accountName ?? "Web App session";
+  const onPlayheadChange = useCallback((ms: number) => {
+    playheadRef.current = ms;
+    // The button label only needs whole seconds.
+    setCopyLabelMs((prev) => (Math.floor(prev / 1000) === Math.floor(ms / 1000) ? prev : ms));
+  }, []);
+
+  const copyLink = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("t", String(Math.floor(playheadRef.current / 1000)));
+    navigator.clipboard
+      .writeText(url.toString())
+      .then(() => createNotification({ type: "success", text: "Link copied" }))
+      .catch(() => createNotification({ type: "error", text: "Could not copy the link" }));
+  };
 
   if (!fixtureVariant && !isSessionLoading && session && !isWebApp) {
     return (
@@ -70,128 +113,158 @@ export const PamSessionDetailPage = () => {
     );
   }
 
-  let integrity: { label: string; variant: "success" | "warning" | "danger" | "neutral" } = {
-    label: "Not verified",
-    variant: "neutral"
-  };
-  if (state.phase === "verifying") {
-    integrity = {
-      label: `Verifying ${state.progress.done}/${state.progress.total}`,
-      variant: "neutral"
-    };
-  } else if (report && report.ed25519Supported) {
-    const tampered = report.keyCertError || report.video.some((v) => v.status === "tampered");
-    const missing = report.video.find((v) => v.status === "missing");
-    if (tampered) integrity = { label: "Tampered", variant: "danger" };
-    else if (missing)
-      integrity = { label: `Gap · object ${missing.objectIndex}`, variant: "warning" };
-    else if (report.video.length > 0) {
-      integrity = { label: "Video verified · chain not checked", variant: "neutral" };
-    }
-  }
+  const accountName = session?.accountName ?? "Web App session";
+  const gatewayLabel = timeline?.sessionOpen?.gatewayId
+    ? `gateway ${timeline.sessionOpen.gatewayId.slice(0, 8)}`
+    : "the gateway";
 
-  const fatalError =
-    state.phase === "error"
-      ? state.message
-      : (report?.fetchFailure?.message ?? report?.limitError?.message ?? playerError);
+  let errorDetails: TReplayErrorDetails | null = null;
+  if (state.phase === "error") errorDetails = { step: "replay", message: state.message };
+  else if (report?.fetchFailure) {
+    errorDetails = {
+      step: `fetch ${report.fetchFailure.series}`,
+      objectIndex: report.fetchFailure.objectIndex,
+      message: report.fetchFailure.message
+    };
+  } else if (report?.limitError) {
+    errorDetails = { step: "limits", message: report.limitError.message };
+  } else if (playerError) errorDetails = { step: "player", message: playerError };
+
+  const copyErrorDetails = () => {
+    if (!errorDetails) return;
+    const text = JSON.stringify({ sessionId, ...errorDetails }, null, 2);
+    navigator.clipboard
+      .writeText(text)
+      .then(() => createNotification({ type: "success", text: "Error details copied" }))
+      .catch(() => createNotification({ type: "error", text: "Could not copy the error details" }));
+  };
+
+  const verifiedCount = report
+    ? [...report.video, ...report.events].filter((r) => r.status === "verified").length
+    : 0;
+  const listedCount = report ? report.video.length + report.events.length : 0;
+  const isUploading =
+    replay?.status === "active" ||
+    (Boolean(report) && !timeline?.sessionEnd && verifiedCount < listedCount);
 
   let body;
-  if (fatalError) {
+  if (errorDetails) {
     body = (
-      <Empty className="border">
-        <EmptyHeader>
-          <EmptyTitle>Recording unavailable: decryption failed</EmptyTitle>
-          <EmptyDescription>{fatalError}</EmptyDescription>
-        </EmptyHeader>
-        <EmptyContent>
-          <Button
-            variant="outline"
-            onClick={() => {
-              setPlayerError(null);
-              retry();
-            }}
-          >
-            Retry decryption
-          </Button>
-        </EmptyContent>
-      </Empty>
+      <ReplayErrorState
+        orgId={orgId}
+        details={errorDetails}
+        onRetry={() => {
+          setPlayerError(null);
+          retry();
+        }}
+        onCopy={copyErrorDetails}
+      />
     );
-  } else if (!report) {
-    const progress = state.phase === "verifying" ? state.progress : null;
-    body = (
-      <div className="flex flex-col gap-3">
-        <p className="text-sm text-muted">
-          {progress && progress.total > 0
-            ? `Verifying chunk ${progress.done} of ${progress.total}`
-            : "Loading recording"}
-        </p>
-        <Skeleton className="aspect-video w-full" />
-      </div>
-    );
+  } else if (!report || !timeline || !replay) {
+    body = <ReplayLoadingState done={progress?.done ?? 0} total={progress?.total ?? 0} />;
   } else if (!report.ed25519Supported) {
     body = (
-      <Empty className="border">
-        <EmptyHeader>
-          <EmptyTitle>Not verified</EmptyTitle>
-          <EmptyDescription>
-            This browser cannot check Ed25519 signatures, so the recording is not shown.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <ReplayEmptyState
+        title="Not verified"
+        description="This browser cannot check Ed25519 signatures, so the recording is not shown."
+      />
     );
-  } else if (report.keyCertError || verifiedVideo.length === 0) {
+  } else if (report.keyCertError) {
     body = (
-      <Empty className="border">
-        <EmptyHeader>
-          <EmptyTitle>
-            {report.keyCertError ? "Recording refused: signature mismatch" : "No verified video"}
-          </EmptyTitle>
-          <EmptyDescription>
-            {report.keyCertError?.message ?? "No video object passed verification."}
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <IntegrityIssueBanner
+        variant="danger"
+        title="Recording refused: the session key certificate does not verify"
+        detail={integrity.detail}
+      />
+    );
+  } else if (report.verifiedVideo.length === 0 && timeline.l1Rows.length === 0) {
+    body = isUploading ? (
+      <ReplayEmptyState
+        title={`Recording still uploading from ${gatewayLabel}. ${verifiedCount} of ${listedCount} chunks received...`}
+      />
+    ) : (
+      <ReplayEmptyState title={`Session ended with no traffic to ${accountName}`} />
     );
   } else {
+    const issue =
+      integrity.state === "tampered" ||
+      integrity.state === "gap" ||
+      integrity.state === "incomplete";
     body = (
-      <div className="flex flex-col gap-3">
-        <MseVideoPlayer
-          ref={playerRef}
-          className="aspect-video w-full rounded-md bg-black"
-          mime={replay?.video.mime ?? ""}
-          objects={verifiedVideo}
-          onPlayingChange={setIsPlaying}
-          onError={setPlayerError}
+      <div className="flex flex-col gap-4">
+        {issue && (
+          <IntegrityIssueBanner
+            variant={integrity.state === "tampered" ? "danger" : "warning"}
+            title={integrity.label}
+            detail={integrity.detail}
+          />
+        )}
+        {isUploading && (
+          <Alert variant="info">
+            <AlertTitle>
+              Recording still uploading from {gatewayLabel}. {verifiedCount} of {listedCount} chunks
+              received...
+            </AlertTitle>
+            <AlertDescription>The integrity chip covers only what has arrived.</AlertDescription>
+          </Alert>
+        )}
+        <ReplayWorkspace
+          replay={replay}
+          report={report}
+          timeline={timeline}
+          clock={clock}
+          gatewayLabel={gatewayLabel}
+          initialSessionMs={search.t !== undefined ? search.t * 1000 : undefined}
+          onPlayheadChange={onPlayheadChange}
+          onPlayerError={setPlayerError}
         />
-        <div>
-          <Button variant="outline" size="xs" onClick={() => playerRef.current?.toggle()}>
-            {isPlaying ? <PauseIcon /> : <PlayIcon />}
-            {isPlaying ? "Pause" : "Play"}
-          </Button>
-        </div>
       </div>
     );
   }
 
+  const statusBadge = session ? (
+    <Badge variant={STATUS_BADGE[session.status].variant}>{capitalize(session.status)}</Badge>
+  ) : null;
+
+  const metadata: TMetadataItem[] = [
+    { label: "User", value: session?.actorEmail || session?.actorName || "-" },
+    { label: "Folder", value: session?.folderName || "-" },
+    {
+      label: "Window",
+      value: replay?.startedAt
+        ? `${format(new Date(replay.startedAt), "MMM d, h:mm a")}${session ? ` (${formatDuration(session)})` : ""}`
+        : "-"
+    },
+    { label: "Ended", value: timeline?.sessionEnd?.reason ?? replay?.endReason ?? "Ongoing" },
+    { label: "Requests", value: timeline ? String(timeline.l1Rows.length) : "-" },
+    { label: "Inputs", value: timeline ? String(timeline.inputRows.length) : "-" },
+    { label: "Reason", value: session?.reason || "-" },
+    { label: "Gateway", value: gatewayLabel },
+    {
+      label: "Recording key",
+      value: report?.sessionKey?.fingerprint ?? replay?.recordingKey.fingerprint ?? "-",
+      mono: true
+    }
+  ];
+
   return (
-    <div className="mx-auto mb-6 w-full max-w-8xl">
+    <div className="mx-auto mb-6 flex w-full max-w-8xl flex-col gap-4">
       <Helmet>
         <title>Session Review</title>
       </Helmet>
-      <PageHeader
-        scope={ProjectType.PAM}
-        icon={Video}
-        title={title}
-        description={
-          <span className="flex items-center gap-2">
-            <Badge variant="neutral">Web App</Badge>
-            <Badge variant={integrity.variant}>{integrity.label}</Badge>
-          </span>
-        }
+      <ReplayHeader
+        title={accountName}
+        status={statusBadge}
+        integrity={{
+          label: integrity.label,
+          variant: CHIP_VARIANT[integrity.state],
+          detail: integrity.detail
+        }}
+        copyLinkLabel={`Copy link at ${formatSessionTime(copyLabelMs)}`}
+        onCopyLink={copyLink}
       />
-      <Card className="mt-4">
-        <CardContent className="pt-4">{body}</CardContent>
-      </Card>
+      <MetadataStrip items={metadata} />
+      {body}
     </div>
   );
 };
