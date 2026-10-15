@@ -10,6 +10,7 @@ export type TPamRecordingChunkRef = {
 
 export type TPamRecordingResolvedConfig = {
   backend: PamRecordingStorageBackend;
+  requireObjectLock?: boolean;
   bucket?: string;
   region?: AWSRegion;
   keyPrefix?: string | null;
