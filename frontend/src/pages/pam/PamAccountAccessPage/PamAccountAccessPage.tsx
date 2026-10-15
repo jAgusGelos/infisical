@@ -6,6 +6,8 @@ import { TriangleAlert } from "lucide-react";
 import { PamAccountType, TPamAccount, useGetPamAccountById } from "@app/hooks/api/pam";
 import { PamDataExplorerPage } from "@app/pages/pam/PamDataExplorerPage/PamDataExplorerPage";
 
+import { getDevMockWsUrl } from "./web-app/devMock";
+import { WebAppViewer } from "./web-app/WebAppViewer";
 import { AwsIamAccessContent } from "./AwsIamAccessContent";
 import { DisconnectedScreen } from "./DisconnectedScreen";
 import { RdpLauncher } from "./RdpLauncher";
@@ -130,6 +132,9 @@ const PageContent = () => {
   return (
     <SessionAccessGate account={account}>
       {({ reason, mfaSessionId }) => {
+        if (account.accountType === PamAccountType.WebApp || getDevMockWsUrl()) {
+          return <WebAppViewer account={account} reason={reason} mfaSessionId={mfaSessionId} />;
+        }
         if (
           account.accountType === PamAccountType.Postgres ||
           account.accountType === PamAccountType.MySQL ||
