@@ -96,7 +96,7 @@ export const useVerifiedWebAppReplay = ({
   if (replayQuery.isError) {
     return {
       replay: undefined,
-      state: { phase: "error", message: (replayQuery.error as Error).message } as const,
+      state: { phase: "error", message: replayQuery.error.message } as const,
       retry
     };
   }
