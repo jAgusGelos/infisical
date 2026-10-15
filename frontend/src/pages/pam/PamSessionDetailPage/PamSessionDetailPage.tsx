@@ -17,7 +17,7 @@ import { capitalize, STATUS_BADGE } from "../PamSessionsPage/constants";
 import { MetadataStrip } from "./components/MetadataStrip";
 import { ReplayBody } from "./components/ReplayBody";
 import { ReplayHeader } from "./components/ReplayHeader";
-import { NotWebAppSessionState } from "./components/ReplayStates";
+import { NotWebAppSessionState, SessionLookupErrorState } from "./components/ReplayStates";
 import {
   buildSessionMetadata,
   CHIP_VARIANT,
@@ -35,7 +35,12 @@ export const PamSessionDetailPage = () => {
   const fixtureVariant = import.meta.env.DEV ? search.replayFixture : undefined;
   const initialSessionMs = search.t !== undefined ? search.t * 1000 : undefined;
 
-  const { data: session, isLoading: isSessionLoading } = useGetPamSessionById(
+  const {
+    data: session,
+    error: sessionError,
+    isLoading: isSessionLoading,
+    refetch: refetchSession
+  } = useGetPamSessionById(
     fixtureVariant ? "" : sessionId
   );
   const isWebApp = Boolean(fixtureVariant) || session?.accountType === PamAccountType.WebApp;
@@ -68,6 +73,14 @@ export const PamSessionDetailPage = () => {
     return (
       <div className="mx-auto mb-6 w-full max-w-8xl">
         <NotWebAppSessionState orgId={orgId} />
+      </div>
+    );
+  }
+
+  if (!fixtureVariant && sessionError) {
+    return (
+      <div className="mx-auto mb-6 w-full max-w-8xl">
+        <SessionLookupErrorState onRetry={() => void refetchSession()} />
       </div>
     );
   }
