@@ -668,10 +668,9 @@ describe("Web App E continuity", () => {
     const second = ctx.submit(e1).finally(() => {
       secondSettled = true;
     });
-    await new Promise((r) => {
-      setTimeout(r, 20);
-    });
-    // E1 has done its network checks and now waits for the lock E0 holds.
+    // E1 has done its network checks and opened its transaction, where it waits for the lock E0 holds. Waiting on the
+    // transaction count rather than a fixed delay keeps this independent of how long the network checks take.
+    await vi.waitFor(() => expect(ctx.stats.openTx).toBe(2), { timeout: 5_000 });
     expect(secondSettled).toBe(false);
 
     e0Release.resolve();

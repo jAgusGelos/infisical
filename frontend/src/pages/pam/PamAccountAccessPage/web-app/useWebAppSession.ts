@@ -127,6 +127,7 @@ export const useWebAppSession = ({ accountId, reason, mfaSessionId }: Options) =
         if (reconnectStatusRef.current === "waiting" && isRetryableTicketError(err)) {
           applyState({ ...initialViewerState, phase: "disconnected" });
         } else {
+          updateReconnectStatus("idle");
           fail(connectErrorMessage(err));
         }
         return;
@@ -218,7 +219,7 @@ export const useWebAppSession = ({ accountId, reason, mfaSessionId }: Options) =
       generationRef.current += 1;
       teardown();
     };
-  }, [teardown, updateReconnectStatus]);
+  }, [connect, teardown, updateReconnectStatus]);
 
   const sendInput = useCallback(
     (events: TInputEvent[]) => clientRef.current?.sendInput(events) ?? false,

@@ -72,6 +72,25 @@ export const ReplayErrorState = ({
   </Empty>
 );
 
+export const SessionLookupErrorState = ({
+  onRetry
+}: {
+  onRetry: () => void;
+}) => (
+  <Empty className="border" data-testid="session-lookup-error">
+    <EmptyHeader>
+      <EmptyTitle>Session unavailable</EmptyTitle>
+      <EmptyDescription>We could not load this PAM session.</EmptyDescription>
+    </EmptyHeader>
+    <EmptyContent>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        <RefreshCwIcon />
+        Retry
+      </Button>
+    </EmptyContent>
+  </Empty>
+);
+
 export const ReplayEmptyState = ({
   title,
   description

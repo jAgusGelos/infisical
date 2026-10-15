@@ -65,7 +65,7 @@ export const createInputFilter = () => {
       droppedDown.delete(ev.code);
       return rule;
     }
-    const rule = matchShortcut(ev.code, ev.mods);
+    const rule = matchShortcut(ev.code, ev.mods ?? 0);
     if (rule) droppedDown.set(ev.code, rule);
     return rule;
   };
