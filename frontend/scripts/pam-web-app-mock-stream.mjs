@@ -55,7 +55,16 @@ const T = {
 };
 const TYPE_NAMES = Object.fromEntries(Object.entries(T).map(([name, value]) => [value, name]));
 const HEADER = 20;
+const FLAG_KEYFRAME = 1;
+const MAX_UPSTREAM_PAYLOAD = 61440;
+const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const WIDTH = 1280;
+const HEIGHT = 720;
 const FPS = 30;
+const SESSION_SECONDS = 3600;
+const NAL_IDR = 5;
+const NAL_SPS = 7;
+const NAL_AUD = 9;
 
 const encodeFrame = (type, flags, seq, timestampUs, payload) => {
   const out = Buffer.alloc(HEADER + payload.length);
@@ -85,10 +94,11 @@ const decodeFrame = (buf) => {
 
 const selfCheck = () => {
   const vectors = JSON.parse(readFileSync(VECTORS, "utf8"));
-  vectors.forEach((v) => {
+  const checkVector = (v) => {
     const frame = encodeFrame(v.type, v.flags, v.seq, v.timestampUs, Buffer.from(v.payloadHex, "hex"));
     if (frame.toString("hex") !== v.frameHex) throw new Error(`header self-check failed for ${v.name}`);
-  });
+  };
+  vectors.forEach(checkVector);
   console.log(`self-check ok (${vectors.length} vectors)`);
 };
 
@@ -112,19 +122,20 @@ const splitAccessUnits = (data) => {
   const units = [];
   let current = null;
   let codec = null;
-  findStartCodes(data).forEach(({ at, nal }) => {
+  const visitNal = ({ at, nal }) => {
     const nalType = data[nal] & 0x1f;
-    if (nalType === 9) {
+    if (nalType === NAL_AUD) {
       if (current) units.push(current);
       current = { start: at, keyframe: false };
     }
-    if (nalType === 5 && current) current.keyframe = true;
-    if (nalType === 7 && !codec) {
+    if (nalType === NAL_IDR && current) current.keyframe = true;
+    if (nalType === NAL_SPS && !codec) {
       codec = `avc1.${[data[nal + 1], data[nal + 2], data[nal + 3]]
         .map((b) => b.toString(16).padStart(2, "0").toUpperCase())
         .join("")}`;
     }
-  });
+  };
+  findStartCodes(data).forEach(visitNal);
   if (current) units.push(current);
   return {
     codec,
@@ -141,7 +152,7 @@ const generateStream = () => {
   const input = args.input ?? DEFAULT_INPUT;
   const source = existsSync(input)
     ? ["-i", input]
-    : ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=10"];
+    : ["-f", "lavfi", "-i", `testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}:duration=10`];
   // The moving square guarantees visible change even when the recording is mostly static.
   const result = spawnSync(
     "ffmpeg",
@@ -167,6 +178,16 @@ const generateStream = () => {
   return stream;
 };
 
+const describeInputEvent = (e) => {
+  if (e.t === "key") return `key:${e.action}:${e.code}:${e.key}:m${e.mods}`;
+  if (e.t === "move") return `move:${e.x},${e.y}:b${e.buttons}`;
+  if (e.t === "button") return `button:${e.action}:${e.button}@${e.x},${e.y}`;
+  if (e.t === "wheel") return `wheel:${e.dx},${e.dy}@${e.x},${e.y}`;
+  if (e.t === "ime") return `ime:${JSON.stringify(e.text)}`;
+  if (e.t === "paste") return `paste:${e.id}:${e.part + 1}/${e.total}:${e.text.length}ch`;
+  return e.t;
+};
+
 const describeUpstream = (frame) => {
   const name = TYPE_NAMES[frame.type] ?? `0x${frame.type.toString(16)}`;
   if (frame.type === T.Ack) {
@@ -174,17 +195,7 @@ const describeUpstream = (frame) => {
   }
   if (frame.type === T.Input) {
     const { events } = JSON.parse(frame.payload.toString("utf8"));
-    const summary = events
-      .map((e) => {
-        if (e.t === "key") return `key:${e.action}:${e.code}:${e.key}:m${e.mods}`;
-        if (e.t === "move") return `move:${e.x},${e.y}:b${e.buttons}`;
-        if (e.t === "button") return `button:${e.action}:${e.button}@${e.x},${e.y}`;
-        if (e.t === "wheel") return `wheel:${e.dx},${e.dy}@${e.x},${e.y}`;
-        if (e.t === "ime") return `ime:${JSON.stringify(e.text)}`;
-        if (e.t === "paste") return `paste:${e.id}:${e.part + 1}/${e.total}:${e.text.length}ch`;
-        return e.t;
-      })
-      .join(" ");
+    const summary = events.map(describeInputEvent).join(" ");
     return `${name} seq=${frame.seq} bytes=${frame.payload.length} ${summary}`;
   }
   if (frame.payload.length > 0) return `${name} seq=${frame.seq} ${frame.payload.toString("utf8")}`;
@@ -220,7 +231,7 @@ const serve = (stream) => {
     console.log("viewer connected");
 
     const startStream = () => {
-      const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+      const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000).toISOString();
       link.control({
         kind: "session_ready",
         sessionId: randomUUID(),
@@ -228,43 +239,45 @@ const serve = (stream) => {
         inputEnabled: true,
         policy: { clipboard: "off", downloads: "block", uploads: "block" }
       });
-      link.control({ kind: "time_left", secondsLeft: 3600, expiresAt });
+      link.control({ kind: "time_left", secondsLeft: SESSION_SECONDS, expiresAt });
       link.send(
         T.VideoConfig,
         Buffer.from(
-          JSON.stringify({ codec: stream.codec, format: "annexb", width: 1280, height: 720, framerate: FPS, epoch: 1 })
+          JSON.stringify({ codec: stream.codec, format: "annexb", width: WIDTH, height: HEIGHT, framerate: FPS, epoch: 1 })
         )
       );
       console.log(`sent session_ready, time_left, VIDEO_CONFIG ${stream.codec}`);
       link.timer = setInterval(() => {
-        if (link.hidden || ws.bufferedAmount > 2 * 1024 * 1024) return;
+        if (link.hidden || ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
         const unit = stream.units[link.auIndex % stream.units.length];
-        link.send(T.VideoChunk, unit.data, unit.keyframe ? 1 : 0, Math.round((frameCount * 1e6) / FPS));
+        link.send(T.VideoChunk, unit.data, unit.keyframe ? FLAG_KEYFRAME : 0, Math.round((frameCount * 1e6) / FPS));
         frameCount += 1;
         link.auIndex += 1;
       }, 1000 / FPS);
     };
 
+    const rejectProtocol = (reason) => {
+      console.log(`protocol error: ${reason}, closing`);
+      ws.close(1008, "protocol_error");
+    };
+
     ws.on("message", (data, isBinary) => {
       if (!isBinary) {
-        console.log("protocol error: text message from viewer, closing");
-        ws.close(1008, "protocol_error");
+        rejectProtocol("text message from viewer");
         return;
       }
       let frame;
       try {
         frame = decodeFrame(Buffer.from(data));
       } catch (err) {
-        console.log(`protocol error: ${err.message}, closing`);
-        ws.close(1008, "protocol_error");
+        rejectProtocol(err.message);
         return;
       }
       if (!link.helloSeen && frame.type !== T.Hello) {
-        console.log(`protocol error: first upstream frame is ${TYPE_NAMES[frame.type]}, not HELLO`);
-        ws.close(1008, "protocol_error");
+        rejectProtocol(`first upstream frame is ${TYPE_NAMES[frame.type]}, not HELLO`);
         return;
       }
-      if (frame.payload.length > 61440) console.log(`LIMIT EXCEEDED: upstream payload ${frame.payload.length}`);
+      if (frame.payload.length > MAX_UPSTREAM_PAYLOAD) console.log(`LIMIT EXCEEDED: upstream payload ${frame.payload.length}`);
       if (frame.type === T.Ack) {
         const now = Date.now();
         if (lastAckAt !== null) maxAckGap = Math.max(maxAckGap, now - lastAckAt);
