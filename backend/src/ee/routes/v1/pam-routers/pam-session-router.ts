@@ -144,7 +144,10 @@ export const registerPamSessionRouter = async (server: FastifyZodProvider) => {
               sessionId: z.string()
             })
             .nullable(),
-          policyRules: PamPolicyRulesSchema
+          policyRules: PamPolicyRulesSchema,
+          // Web App gateways record both in the session_open event (CONTRACTS 5.6)
+          accountId: z.string().uuid().nullable().optional(),
+          userId: z.string().uuid().nullable().optional()
         })
       }
     },
@@ -187,7 +190,9 @@ export const registerPamSessionRouter = async (server: FastifyZodProvider) => {
       return {
         credentials: result.credentials,
         recording: result.recording,
-        policyRules: result.policyRules ?? null
+        policyRules: result.policyRules ?? null,
+        accountId: result.accountId ?? null,
+        userId: result.userId
       };
     }
   });
@@ -591,6 +596,7 @@ export const registerPamWebAccessRouter = async (server: FastifyZodProvider) => 
 
         await server.services.pamWebAccess.handleWebSocketConnection({
           socket: connection,
+          rawSocket: req.raw.socket,
           accountId: payload.accountId,
           projectId: payload.projectId,
           orgId: payload.orgId,
