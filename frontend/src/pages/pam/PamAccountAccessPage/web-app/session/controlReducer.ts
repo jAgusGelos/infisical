@@ -1,12 +1,12 @@
 import type { TControlDown } from "@app/lib/pam-web-app/contract";
 
-import type { TViewerState } from "./types";
+import type { TViewerPhase, TViewerState } from "./types";
 
-const isTerminal = (state: TViewerState) =>
-  state.phase === "ended" || state.phase === "failed" || state.phase === "disconnected";
+export const isTerminalPhase = (phase: TViewerPhase) =>
+  phase === "ended" || phase === "failed" || phase === "disconnected";
 
 export const controlReducer = (state: TViewerState, control: TControlDown): TViewerState => {
-  if (isTerminal(state)) return state;
+  if (isTerminalPhase(state.phase)) return state;
 
   switch (control.kind) {
     case "session_ready":

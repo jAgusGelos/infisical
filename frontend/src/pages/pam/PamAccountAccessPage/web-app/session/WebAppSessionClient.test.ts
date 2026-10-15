@@ -183,6 +183,20 @@ describe("WebAppSessionClient", () => {
     expect(wrongType.client.getState().error?.code).toBe("protocol_error");
   });
 
+  it("fails the session with a client error when handling a frame throws", () => {
+    const { client, decoder, socket } = setup();
+    decoder.configure = () => {
+      throw new TypeError("invalid codec");
+    };
+    client.start();
+    client.handleMessage(downstream(FrameType.VideoConfig, encodeJsonPayload(videoConfig)));
+    expect(client.getState()).toMatchObject({
+      phase: "failed",
+      error: { code: "client_error", message: "invalid codec" }
+    });
+    expect(socket.closed).toBe(1000);
+  });
+
   it("ignores CLIPBOARD_DOWN", () => {
     const { client } = setup();
     client.start();

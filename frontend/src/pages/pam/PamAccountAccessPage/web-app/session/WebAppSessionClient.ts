@@ -18,7 +18,7 @@ import {
 
 import { splitInputBatches } from "../input/InputBatcher";
 import { AckScheduler } from "./AckScheduler";
-import { canSendInput, controlReducer } from "./controlReducer";
+import { canSendInput, controlReducer, isTerminalPhase } from "./controlReducer";
 import { KeyframeRequester } from "./KeyframeRequester";
 import {
   initialViewerState,
@@ -30,6 +30,8 @@ import {
 } from "./types";
 
 export const END_SESSION_TIMEOUT_MS = 5000;
+
+export const WS_NORMAL_CLOSURE = 1000;
 
 const MAX_SEQ = 0xffffffff;
 
@@ -51,7 +53,7 @@ export class WebAppSessionClient {
 
   private started = false;
 
-  private endTimer: unknown = null;
+  private endTimer: number | null = null;
 
   private readonly acks: AckScheduler;
 
@@ -118,7 +120,10 @@ export class WebAppSessionClient {
       } else if (err instanceof SyntaxError) {
         this.fail({ code: "protocol_error", message: "Malformed JSON payload" });
       } else {
-        throw err;
+        this.fail({
+          code: "client_error",
+          message: err instanceof Error ? err.message : String(err)
+        });
       }
     }
   }
@@ -151,7 +156,7 @@ export class WebAppSessionClient {
     this.setState({ ...this.state, phase: "ending", inputEnabled: false });
     this.endTimer = this.options.clock.setTimeout(() => {
       this.endTimer = null;
-      this.options.socket.close(1000, "end session timeout");
+      this.options.socket.close(WS_NORMAL_CLOSURE, "end session timeout");
     }, END_SESSION_TIMEOUT_MS);
   }
 
@@ -186,7 +191,7 @@ export class WebAppSessionClient {
     this.setState({ ...this.state, phase: "failed", inputEnabled: false, error });
     this.acks.stop();
     this.clearEndTimer();
-    this.options.socket.close(1000, error.code);
+    this.options.socket.close(WS_NORMAL_CLOSURE, error.code);
   }
 
   private sendFrame(type: FrameType, payload: Uint8Array) {
@@ -203,8 +208,7 @@ export class WebAppSessionClient {
   }
 
   private isTerminal() {
-    const { phase } = this.state;
-    return phase === "ended" || phase === "failed" || phase === "disconnected";
+    return isTerminalPhase(this.state.phase);
   }
 
   private setState(next: TViewerState) {
