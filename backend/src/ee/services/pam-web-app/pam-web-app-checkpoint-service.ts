@@ -236,6 +236,8 @@ export const pamWebAppCheckpointServiceFactory = ({
   pamAccountDAL,
   now = Date.now
 }: TPamWebAppCheckpointServiceFactoryDep) => {
+  const manifestLocks = new Map<string, Promise<void>>();
+
   const getWebAppSession = async (sessionId: string) => {
     const session = await pamSessionDAL.findById(sessionId);
     if (!session || session.accountType !== PamAccountType.WebApp) {
@@ -273,46 +275,6 @@ export const pamWebAppCheckpointServiceFactory = ({
       );
     }
     return storage;
-  };
-
-  const signManifestIfComplete = async (session: TWebAppSession) => {
-    if (!pamWebAppManifestService) return;
-    const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
-    if (keys?.finalSeq === null || keys?.finalSeq === undefined) return;
-    const objects = await pamWebAppObjectDAL.findBySessionId(session.id);
-    const covering = objects.find(
-      (object) =>
-        object.series === PamWebAppSeries.E &&
-        Number(object.firstSeq) <= Number(keys.finalSeq) &&
-        Number(object.lastSeq) >= Number(keys.finalSeq)
-    );
-    if (!covering) return;
-    try {
-      await pamWebAppManifestService.signManifest({
-        sessionId: session.id,
-        projectId: session.projectId,
-        recordingKeyFingerprint: keys.fingerprint,
-        finalSeq: Number(keys.finalSeq),
-        endReason: keys.endReason ?? null,
-        objects: objects.map((object) => ({
-          series: object.series,
-          objectIndex: object.objectIndex,
-          kind: object.kind,
-          firstSeq: Number(object.firstSeq),
-          lastSeq: Number(object.lastSeq),
-          objectKey: object.objectKey,
-          versionId: object.versionId,
-          binding: object.binding,
-          checkpoint: object.checkpoint
-        })),
-        hasLoss: false
-      });
-    } catch (err) {
-      logger.error(
-        { sessionId: session.id, error: err },
-        `Web App manifest signing deferred [sessionId=${session.id}]`
-      );
-    }
   };
 
   const open = async (
@@ -376,17 +338,30 @@ export const pamWebAppCheckpointServiceFactory = ({
       return { ok: true as const };
     }
 
-    await pamWebAppSessionKeyDAL.create({
-      sessionId: session.id,
-      gatewayId: session.gatewayId ?? null,
-      recordingPublicKey: Buffer.from(recordingPublicKey),
-      recordingKeyId: await keyIdHex(recordingPublicKey),
-      fingerprint: expectedFingerprint,
-      keyCert: Buffer.from(keyCertBytes),
-      keyCertSig: Buffer.from(keyCertSig),
-      sessionPublicKey: Buffer.from(cert.sessionPublicKey),
-      sessionKeyId: await keyIdHex(cert.sessionPublicKey)
-    });
+    try {
+      await pamWebAppSessionKeyDAL.create({
+        sessionId: session.id,
+        gatewayId: session.gatewayId ?? null,
+        recordingPublicKey: Buffer.from(recordingPublicKey),
+        recordingKeyId: await keyIdHex(recordingPublicKey),
+        fingerprint: expectedFingerprint,
+        keyCert: Buffer.from(keyCertBytes),
+        keyCertSig: Buffer.from(keyCertSig),
+        sessionPublicKey: Buffer.from(cert.sessionPublicKey),
+        sessionKeyId: await keyIdHex(cert.sessionPublicKey)
+      });
+    } catch (err) {
+      const raced = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+      if (!raced) throw err;
+      const same =
+        equalBytes(new Uint8Array(raced.keyCert), keyCertBytes) &&
+        equalBytes(new Uint8Array(raced.keyCertSig), keyCertSig) &&
+        equalBytes(new Uint8Array(raced.recordingPublicKey), recordingPublicKey);
+      if (!same) {
+        throw new PamWebAppError(PamWebAppErrorCode.Conflict, "This session was already opened with a different key");
+      }
+      return { ok: true as const };
+    }
 
     logger.info(
       { sessionId: session.id, fingerprint: expectedFingerprint },
@@ -533,21 +508,91 @@ export const pamWebAppCheckpointServiceFactory = ({
     return plaintext;
   };
 
-  const readPlaintext = async (
+  async function readPlaintext(
     session: TWebAppSession,
     storage: TPamWebAppStorage,
     sessionKey: Uint8Array,
     ref: TStoredRef
-  ) => decryptStoredObject(session, sessionKey, ref, await readStoredObject(session, storage, ref));
+  ) {
+    return decryptStoredObject(session, sessionKey, ref, await readStoredObject(session, storage, ref));
+  }
 
-  const rowRef = (row: TPamWebAppObjects): TStoredRef => ({
-    series: row.series as PamWebAppSeries,
-    objectIndex: row.objectIndex,
-    objectKey: row.objectKey,
-    versionId: row.versionId,
-    ciphertextSha256: new Uint8Array(row.ciphertextSha256),
-    plaintextSha256: new Uint8Array(row.plaintextSha256)
-  });
+  function rowRef(row: TPamWebAppObjects): TStoredRef {
+    return {
+      series: row.series as PamWebAppSeries,
+      objectIndex: row.objectIndex,
+      objectKey: row.objectKey,
+      versionId: row.versionId,
+      ciphertextSha256: new Uint8Array(row.ciphertextSha256),
+      plaintextSha256: new Uint8Array(row.plaintextSha256)
+    };
+  }
+
+  const signManifestIfComplete = async (session: TWebAppSession) => {
+    if (!pamWebAppManifestService) return;
+
+    const previous = manifestLocks.get(session.id) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const keys = await pamWebAppSessionKeyDAL.findBySessionId(session.id);
+        if (keys?.finalSeq === null || keys?.finalSeq === undefined) return;
+        const objects = await pamWebAppObjectDAL.findBySessionId(session.id);
+        const covering = objects.find(
+          (object) =>
+            object.series === PamWebAppSeries.E &&
+            Number(object.firstSeq) <= Number(keys.finalSeq) &&
+            Number(object.lastSeq) >= Number(keys.finalSeq)
+        );
+        if (!covering) return;
+
+        try {
+          const storage = await getObjectStorage(session);
+          const sessionKey = await getSessionKey(session);
+          const lossFlags = await Promise.all(
+            objects
+              .filter((object) => object.series === PamWebAppSeries.E)
+              .map(async (object) => {
+                const plaintext = await readPlaintext(session, storage, sessionKey, rowRef(object));
+                return parseEnvelopes(plaintext).some(
+                  (envelope) => envelope.type === EventType.Loss || envelope.type === EventType.ContinuityUnknown
+                );
+              })
+          );
+
+          await pamWebAppManifestService.signManifest({
+            sessionId: session.id,
+            projectId: session.projectId,
+            recordingKeyFingerprint: keys.fingerprint,
+            finalSeq: Number(keys.finalSeq),
+            endReason: keys.endReason ?? null,
+            objects: objects.map((object) => ({
+              series: object.series,
+              objectIndex: object.objectIndex,
+              kind: object.kind,
+              firstSeq: Number(object.firstSeq),
+              lastSeq: Number(object.lastSeq),
+              objectKey: object.objectKey,
+              versionId: object.versionId,
+              binding: object.binding,
+              checkpoint: object.checkpoint
+            })),
+            hasLoss: lossFlags.some(Boolean)
+          });
+        } catch (err) {
+          logger.error(
+            { sessionId: session.id, error: err },
+            `Web App manifest signing deferred [sessionId=${session.id}]`
+          );
+        }
+      });
+    manifestLocks.set(session.id, current);
+    try {
+      await current;
+    } finally {
+      if (manifestLocks.get(session.id) === current) manifestLocks.delete(session.id);
+    }
+  };
 
   // The chain is checked from the chunk's own first prevHash; linking it to the previous chunk needs the
   // locked session row and happens inside the transaction.
