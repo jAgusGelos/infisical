@@ -113,6 +113,30 @@ describe("web app replay events view model", () => {
     expect(tl.sessionEnd).toMatchObject({ reason: "user_end", vObjects: 2 });
   });
 
+  test("renders a frame of key releases as a release, masked when the gateway masked it", async () => {
+    const tl = buildReplayTimeline([
+      await chunkFrom([
+        ev(EventType.SessionOpen, 0, {}),
+        ev(EventType.L3Input, 100, {
+          events: [{ t: "key", action: "up", code: "KeyS", key: "S" }],
+          masked: false,
+          dropped: []
+        }),
+        ev(EventType.L3Input, 200, {
+          events: [{ t: "key", action: "up", code: "Masked", key: "*", synthetic: true }],
+          masked: true,
+          dropped: []
+        }),
+        ev(EventType.L3Input, 300, { events: [{ t: "move", x: 1, y: 2 }], dropped: [] })
+      ])
+    ]);
+    expect(tl.inputRows.map(({ kind, text, masked }) => ({ kind, text, masked }))).toEqual([
+      { kind: "keys", text: "Released S", masked: false },
+      { kind: "keys", text: "Released [MASKED]", masked: true },
+      { kind: "move", text: "Pointer move", masked: false }
+    ]);
+  });
+
   test("derives action pins from Fetch Metadata; a polling POST is not a write", async () => {
     const tl = buildReplayTimeline([await chunkFrom(sample())]);
     expect(tl.actionPins.map((p) => p.kind)).toEqual([

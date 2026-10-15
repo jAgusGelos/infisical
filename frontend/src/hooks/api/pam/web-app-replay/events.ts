@@ -162,21 +162,27 @@ type TInputDescription = Pick<TInputRow, "kind" | "text">;
 
 const describeKey = (k: TL3Event) => (k.key && k.key.length === 1 ? k.key : `[${k.key ?? "?"}]`);
 
+const describeKeys = (keys: TL3Event[], masked: boolean) =>
+  unmaskText(masked ? MASKED_LABEL : keys.map(describeKey).join(""));
+
 const describeInput = (events: TL3Event[], masked: boolean): TInputDescription => {
   const keys = events.filter((e) => e.t === "key" && e.action !== "up");
+  const releases = events.filter((e) => e.t === "key" && e.action === "up");
   const paste = events.find((e) => e.t === "paste" || e.t === "ime");
   const click = events.find((e) => e.t === "button" && e.action === "down");
   if (paste) {
     return { kind: "paste", text: `Paste: ${unmaskText(paste.text ?? "")}` };
   }
   if (keys.length > 0) {
-    const typed = masked ? MASKED_LABEL : keys.map(describeKey).join("");
-    return { kind: "keys", text: `Typed ${unmaskText(typed)}` };
+    return { kind: "keys", text: `Typed ${describeKeys(keys, masked)}` };
   }
   if (click) {
     return { kind: "click", text: `Click at ${click.x ?? "?"}, ${click.y ?? "?"}` };
   }
   if (events.some((e) => e.t === "wheel")) return { kind: "wheel", text: "Scroll" };
+  if (releases.length > 0) {
+    return { kind: "keys", text: `Released ${describeKeys(releases, masked)}` };
+  }
   return { kind: "move", text: "Pointer move" };
 };
 
