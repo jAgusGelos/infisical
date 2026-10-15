@@ -217,11 +217,11 @@ export const MOD_ALT = 4;
 export const MOD_META = 8;
 
 export type TInputEvent =
-  | { t: "key"; action: "down" | "up"; code: string; key: string; mods: number; repeat: boolean; ts: number }
-  | { t: "move"; x: number; y: number; buttons: number; ts: number }
-  | { t: "button"; action: "down" | "up"; button: number; x: number; y: number; mods: number; ts: number }
-  | { t: "wheel"; dx: number; dy: number; x: number; y: number; mods: number; ts: number }
-  | { t: "ime"; text: string; ts: number }
-  | { t: "paste"; id: string; part: number; total: number; text: string; ts: number };
+  | { t: "key"; action: "down" | "up"; code: string; key: string; mods: number; repeat?: boolean; ts?: number }
+  | { t: "move"; x: number; y: number; buttons: number; ts?: number }
+  | { t: "button"; action: "down" | "up"; button: number; x: number; y: number; mods: number; ts?: number }
+  | { t: "wheel"; dx: number; dy: number; x: number; y: number; mods: number; ts?: number }
+  | { t: "ime"; text: string; ts?: number }
+  | { t: "paste"; id: string; part: number; total: number; text: string; ts?: number };
 
 export type TInputBatch = { events: TInputEvent[] };
