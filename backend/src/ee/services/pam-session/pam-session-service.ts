@@ -401,12 +401,23 @@ export const pamSessionServiceFactory = ({
       );
     }
 
+    // The gateway reads Web App configuration from one nested object (CONTRACTS 8.1).
+    const webApp =
+      account.accountType === PamAccountType.WebApp
+        ? {
+            connectionDetails: normalizedConnectionDetails,
+            credentials,
+            settings: parsedSettings.success ? (parsedSettings.data.webApp ?? null) : null
+          }
+        : undefined;
+
     return {
-      credentials: { ...normalizedConnectionDetails, ...credentials },
+      credentials: { ...normalizedConnectionDetails, ...credentials, ...(webApp ? { webApp } : {}) },
       recording,
       policyRules,
       projectId: session.projectId,
       accountId: session.accountId,
+      userId: session.userId ?? null,
       accountName: session.accountName,
       accountType: session.accountType,
       actorDistinctId,

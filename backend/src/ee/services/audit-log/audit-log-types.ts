@@ -774,6 +774,7 @@ export enum EventType {
   PAM_SESSION_TERMINATE = "pam-session-terminate",
   PAM_SESSION_CHUNK_UPLOAD = "pam-session-chunk-upload",
   PAM_SESSION_UPLOAD_TOKEN_INVALID = "pam-session-upload-token-invalid",
+  PAM_WEB_APP_CHECKPOINT = "pam-web-app-checkpoint",
   PAM_ACCOUNT_TEMPLATE_CREATE = "pam-account-template-create",
   PAM_ACCOUNT_TEMPLATE_UPDATE = "pam-account-template-update",
   PAM_ACCOUNT_TEMPLATE_DELETE = "pam-account-template-delete",
@@ -6191,6 +6192,22 @@ interface PamSessionChunkUploadEvent {
   };
 }
 
+interface PamWebAppCheckpointEvent {
+  type: EventType.PAM_WEB_APP_CHECKPOINT;
+  metadata: {
+    sessionId: string;
+    accountId?: string;
+    folderId?: string;
+    series: "E" | "V";
+    objectIndex: number;
+    firstSeq: number;
+    lastSeq: number;
+    chainHead: string;
+    signerKeyId: string;
+    fingerprint: string;
+  };
+}
+
 interface PamSessionUploadTokenInvalidEvent {
   type: EventType.PAM_SESSION_UPLOAD_TOKEN_INVALID;
   metadata: {
@@ -8525,6 +8542,7 @@ export type Event =
   | PamSessionTerminateEvent
   | PamSessionChunkUploadEvent
   | PamSessionUploadTokenInvalidEvent
+  | PamWebAppCheckpointEvent
   | PamAccountTemplateCreateEvent
   | PamAccountTemplateUpdateEvent
   | PamAccountTemplateDeleteEvent

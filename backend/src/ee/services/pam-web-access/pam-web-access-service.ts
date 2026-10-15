@@ -60,6 +60,11 @@ import {
   WS_IDLE_TIMEOUT_MS,
   WS_PING_INTERVAL_MS
 } from "./pam-web-access-types";
+import {
+  sendWebAppErrorAndClose,
+  sendWebAppServerMessage,
+  sendWebAppSessionEndAndClose
+} from "./web-app/pam-web-app-control";
 
 type TPamWebAccessServiceFactoryDep = {
   pamAccountDAL: Pick<TPamAccountDALFactory, "findByIdWithDetails">;
@@ -110,6 +115,22 @@ type THandleWebSocketConnectionDTO = {
   selectedHost?: string | null;
   preAuthMessages: TEarlyBufferedMsg[];
   preAuthHandler: (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => void;
+  rawSocket?: net.Socket;
+};
+
+// ws keeps the upgrade request's socket on a private field; used when the caller does not pass it.
+const getUnderlyingSocket = (socket: WebSocket): net.Socket | undefined => {
+  // eslint-disable-next-line no-underscore-dangle
+  const candidate = (socket as unknown as { _socket?: unknown })._socket;
+  return candidate instanceof net.Socket ? candidate : undefined;
+};
+
+const selectGatewayProtocol = (accountType: PamAccountType) => {
+  if (accountType === PamAccountType.Windows || accountType === PamAccountType.WindowsAd) {
+    return GatewayProxyProtocol.PamRdpBrowser;
+  }
+  if (accountType === PamAccountType.WebApp) return GatewayProxyProtocol.PamWebApp;
+  return GatewayProxyProtocol.Pam;
 };
 
 export const pamWebAccessServiceFactory = ({
@@ -334,9 +355,27 @@ export const pamWebAccessServiceFactory = ({
     maxSessionDurationMs: policyDurationMs,
     selectedHost,
     preAuthMessages,
-    preAuthHandler
+    preAuthHandler,
+    rawSocket
   }: THandleWebSocketConnectionDTO): Promise<void> => {
     const earlyMessages: TEarlyBufferedMsg[] = preAuthMessages;
+    // Web App viewers only understand binary CONTROL frames, so every message below is routed by wire type.
+    let isWebAppWire = false;
+    let isOpeningTunnel = false;
+    const sendWireMessage = (message: TWebSocketServerMessage) => {
+      if (isWebAppWire) {
+        sendWebAppServerMessage(socket, message);
+        return;
+      }
+      sendMessage(socket, message);
+    };
+    const sendWireSessionEndAndClose = (reason: SessionEndReason) => {
+      if (isWebAppWire) {
+        sendWebAppSessionEndAndClose(socket, reason);
+        return;
+      }
+      sendSessionEndAndClose(socket, reason);
+    };
     const releaseEarlyBuffer = () => {
       socket.off("message", preAuthHandler);
     };
@@ -450,6 +489,8 @@ export const pamWebAccessServiceFactory = ({
         throw new BadRequestError({ message: "Invalid account or project" });
       }
 
+      isWebAppWire = account.accountType === PamAccountType.WebApp;
+
       const handlerEntry = SESSION_HANDLERS[account.accountType as PamAccountType];
       if (!handlerEntry) {
         throw new BadRequestError({ message: "Web access is not supported for this account type" });
@@ -471,21 +512,21 @@ export const pamWebAccessServiceFactory = ({
           projectId
         });
         if (!grant) {
-          sendMessage(socket, {
+          sendWireMessage({
             type: TerminalServerMessageType.Output,
             data: `${SessionEndReason.ApprovalRevoked}\n`
           });
-          sendSessionEndAndClose(socket, SessionEndReason.ApprovalRevoked);
+          sendWireSessionEndAndClose(SessionEndReason.ApprovalRevoked);
           return;
         }
         if (grant.expiresAt) {
           const grantRemainingMs = new Date(grant.expiresAt).getTime() - Date.now();
           if (grantRemainingMs <= 0) {
-            sendMessage(socket, {
+            sendWireMessage({
               type: TerminalServerMessageType.Output,
               data: `${SessionEndReason.ApprovalRevoked}\n`
             });
-            sendSessionEndAndClose(socket, SessionEndReason.ApprovalRevoked);
+            sendWireSessionEndAndClose(SessionEndReason.ApprovalRevoked);
             return;
           }
           sessionDurationCapMs = Math.min(sessionDurationCapMs, grantRemainingMs);
@@ -503,11 +544,11 @@ export const pamWebAccessServiceFactory = ({
       await pamSessionDAL.endExpiredWebSessions(userId, projectId);
       const activeCount = await pamSessionDAL.countActiveWebSessions(userId, projectId);
       if (activeCount >= MAX_WEB_SESSIONS_PER_USER) {
-        sendMessage(socket, {
+        sendWireMessage({
           type: TerminalServerMessageType.Output,
           data: `${SessionEndReason.SessionLimitReached}\n`
         });
-        sendSessionEndAndClose(socket, SessionEndReason.SessionLimitReached);
+        sendWireSessionEndAndClose(SessionEndReason.SessionLimitReached);
         return;
       }
 
@@ -553,6 +594,8 @@ export const pamWebAccessServiceFactory = ({
 
       const createdSession = session;
       const isRdp = account.accountType === PamAccountType.Windows || account.accountType === PamAccountType.WindowsAd;
+      const gatewayProtocol = selectGatewayProtocol(account.accountType as PamAccountType);
+      isOpeningTunnel = true;
 
       // Certs are minted per gateway, so each attempt has to re-mint. `eager` opens the tunnel
       // during setup, so an unreachable gateway fails here where another member can still be tried.
@@ -585,7 +628,7 @@ export const pamWebAccessServiceFactory = ({
           return {
             gatewayDetails: attemptGatewayDetails,
             server: await setupGatewayProxy({
-              protocol: isRdp ? GatewayProxyProtocol.PamRdpBrowser : GatewayProxyProtocol.Pam,
+              protocol: gatewayProtocol,
               ...attemptGatewayDetails,
               longLived: true,
               eager: true
@@ -615,15 +658,16 @@ export const pamWebAccessServiceFactory = ({
 
       const isNearSessionExpiry = () => Date.now() >= expiresAt.getTime() - 30_000;
 
-      const boundSendMessage = (msg: TWebSocketServerMessage) => sendMessage(socket, msg);
+      const boundSendMessage = (msg: TWebSocketServerMessage) => sendWireMessage(msg);
       const boundSendSessionEnd = (reason: SessionEndReason) =>
-        sendMessage(socket, { type: TerminalServerMessageType.SessionEnd, reason });
+        sendWireMessage({ type: TerminalServerMessageType.SessionEnd, reason });
       const handlerCleanup = () => {
         if (!cleanedUp) void cleanup();
       };
 
       const ctx: TSessionContext = {
         socket,
+        rawSocket: isWebAppWire ? (rawSocket ?? getUnderlyingSocket(socket)) : undefined,
         relayPort: proxyServer.port,
         resourceName: account.name,
         sessionId: session.id,
@@ -643,10 +687,11 @@ export const pamWebAccessServiceFactory = ({
       } finally {
         releaseEarlyBuffer();
       }
+      isOpeningTunnel = false;
 
-      // RDP sessions are activated by the gateway after credential exchange,
+      // RDP and Web App sessions are activated by the gateway when it fetches the session credentials,
       // not by the web access service.
-      if (!isRdp) {
+      if (!isRdp && !isWebAppWire) {
         await pamSessionDAL.activateSession(session.id);
       }
 
@@ -673,7 +718,7 @@ export const pamWebAccessServiceFactory = ({
         idleTimer = setTimeout(() => {
           if (!cleanedUp) {
             void cleanup();
-            sendSessionEndAndClose(socket, SessionEndReason.IdleTimeout);
+            sendWireSessionEndAndClose(SessionEndReason.IdleTimeout);
           }
         }, WS_IDLE_TIMEOUT_MS);
       };
@@ -702,7 +747,7 @@ export const pamWebAccessServiceFactory = ({
           try {
             if (!(await pamSessionDAL.isSessionTerminated(sessionId)) || cleanedUp) return;
             await cleanup();
-            sendSessionEndAndClose(socket, SessionEndReason.Terminated);
+            sendWireSessionEndAndClose(SessionEndReason.Terminated);
           } catch (err) {
             logger.error(err, `Failed to check session termination [sessionId=${sessionId}]`);
           }
@@ -716,7 +761,7 @@ export const pamWebAccessServiceFactory = ({
       expiryTimer = setTimeout(() => {
         if (!cleanedUp) {
           void cleanup();
-          sendSessionEndAndClose(socket, SessionEndReason.SessionCompleted);
+          sendWireSessionEndAndClose(SessionEndReason.SessionCompleted);
         }
       }, sessionDurationMs);
 
@@ -732,6 +777,10 @@ export const pamWebAccessServiceFactory = ({
     } catch (err) {
       logger.error(err, "Failed to establish web access session");
       await cleanup();
+      if (isWebAppWire) {
+        sendWebAppErrorAndClose(socket, isOpeningTunnel ? "tunnel_failed" : "internal", SessionEndReason.SetupFailed);
+        return;
+      }
       sendSessionEndAndClose(socket, SessionEndReason.SetupFailed);
     }
   };
