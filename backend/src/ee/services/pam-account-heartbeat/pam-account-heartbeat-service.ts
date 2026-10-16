@@ -18,6 +18,7 @@ import {
   CLOUD_CONNECTION_VALIDATORS,
   exceedsOraclePasswordLimit,
   ORACLE_MAX_PASSWORD_LENGTH,
+  runGatewayConnectionTest,
   testVerifiesCredential
 } from "../pam-account/pam-account-connection-test";
 import { TPamAccountDALFactory, TPamAccountDetail } from "../pam-account/pam-account-dal";
@@ -139,6 +140,14 @@ export const pamAccountHeartbeatServiceFactory = ({
       return { status: PamHeartbeatStatus.Unknown, message: "No credential is stored for this account" };
     }
 
+    // Web App credentials are injected by the gateway's egress proxy; there is no login to probe.
+    if (accountType === PamAccountType.WebApp) {
+      return {
+        status: PamHeartbeatStatus.CannotCheck,
+        message: "Credential checks are not available for Web App accounts"
+      };
+    }
+
     const connectionDetails = validateConnectionDetails(
       accountType,
       await decrypt(projectId, account.encryptedConnectionDetails)
@@ -247,7 +256,12 @@ export const pamAccountHeartbeatServiceFactory = ({
       return { status: PamHeartbeatStatus.CannotCheck, message: "No gateway is attached to this account" };
     }
 
-    const result = await testBuiltConnectionWithGateway(test, gatewayId, gatewayV2Service, HEARTBEAT_TIMEOUT_MS);
+    // No tcp fallback here: reachability says nothing about the credential this check reports on.
+    const { result } = await runGatewayConnectionTest(
+      test,
+      (built) => testBuiltConnectionWithGateway(built, gatewayId, gatewayV2Service, HEARTBEAT_TIMEOUT_MS),
+      { fallbackToTcp: false }
+    );
 
     if (!result) {
       return { status: PamHeartbeatStatus.CannotCheck, message: "The gateway could not be reached" };

@@ -13,7 +13,9 @@ import {
   PamAccountType,
   PamPostgresAuthMethod,
   PamSnowflakeAuthMethod,
-  PamSshAuthMethod
+  PamSshAuthMethod,
+  PamWebAppAuthMethod,
+  PamWebAppHeaderScheme
 } from "../pam/pam-enums";
 import { getApplicablePolicies, PamPolicyDescriptorSchema } from "../pam/pam-policies";
 import {
@@ -107,6 +109,62 @@ type TFieldForcedRuleHint = { when: TFieldConditionHint; value: string | number 
 export const ORACLE_MAX_PASSWORD_LENGTH = 30;
 
 export const ORACLE_MIN_GATEWAY_VERSION = "v0.43.133";
+
+const webAppUrlHost = (url: string) => {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+};
+
+const WebAppConnectionDetailsSchema = z
+  .preprocess(
+    (value) => {
+      if (!value || typeof value !== "object") return value;
+      const details = value as { url?: unknown; allowedHosts?: unknown };
+      const hasHosts = Array.isArray(details.allowedHosts) && details.allowedHosts.length > 0;
+      if (hasHosts || typeof details.url !== "string") return value;
+      const host = webAppUrlHost(details.url.trim());
+      return host ? { ...details, allowedHosts: [host] } : value;
+    },
+    z.object({
+      url: z
+        .string()
+        .trim()
+        .url()
+        .max(2048)
+        .refine((v) => v.startsWith("https://") || v.startsWith("http://"), "URL must start with https:// or http://"),
+      allowedHosts: z
+        .array(z.string().trim().toLowerCase().min(1).max(253).regex(hostPattern, "Host contains invalid characters"))
+        .min(1)
+        .max(10),
+      sslRejectUnauthorized: z.boolean().default(true),
+      sslCertificate: optionalTrimmedString
+    })
+  )
+  .superRefine((details, ctx) => {
+    const host = webAppUrlHost(details.url);
+    if (!host || !details.allowedHosts.includes(host)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["allowedHosts"],
+        message: `Allowed hosts must include the URL's host '${host ?? ""}'`
+      });
+    }
+  });
+
+const WebAppFormLoginRecipeSchema = z.object({
+  loginUrl: z.string().trim().url().max(2048),
+  usernameSelector: z.string().max(512),
+  passwordSelector: z.string().max(512),
+  submitSelector: z.string().max(512),
+  successCheck: z.object({
+    type: z.enum(["url_prefix", "selector_present"]),
+    value: z.string().max(2048)
+  }),
+  timeoutMs: z.number().int().min(1000).max(60000).default(15000)
+});
 
 export const ACCOUNT_TYPE_CONFIGS = {
   [PamAccountType.Postgres]: {
@@ -969,6 +1027,96 @@ export const ACCOUNT_TYPE_CONFIGS = {
         tooltip: "A client secret for the service principal. Stored encrypted and never returned in read responses."
       }
     }
+  },
+  [PamAccountType.WebApp]: {
+    name: "Web App",
+    icon: "WebApp.png",
+    connectionDetails: WebAppConnectionDetailsSchema,
+    credentials: z
+      .discriminatedUnion("authMethod", [
+        z.object({ authMethod: z.literal(PamWebAppAuthMethod.None) }),
+        z.object({
+          authMethod: z.literal(PamWebAppAuthMethod.Header),
+          headerScheme: z.nativeEnum(PamWebAppHeaderScheme),
+          username: z.string().trim().max(256).optional(),
+          password: z.string().max(1024).optional(),
+          token: z.string().max(8192).optional(),
+          headerName: z.string().trim().max(256).optional(),
+          headerValue: z.string().max(8192).optional()
+        }),
+        z.object({
+          authMethod: z.literal(PamWebAppAuthMethod.FormLogin),
+          username: z.string().trim().min(1).max(256),
+          password: z.string().min(1).max(1024),
+          recipe: WebAppFormLoginRecipeSchema
+        })
+      ])
+      .superRefine((credentials, ctx) => {
+        if (credentials.authMethod !== PamWebAppAuthMethod.Header) return;
+        if (credentials.headerScheme === PamWebAppHeaderScheme.Basic) {
+          if (!credentials.username)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["username"],
+              message: "Username is required for Basic authentication"
+            });
+          if (!credentials.password)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["password"],
+              message: "Password is required for Basic authentication"
+            });
+        }
+        if (credentials.headerScheme === PamWebAppHeaderScheme.Bearer && !credentials.token) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["token"],
+            message: "Token is required for Bearer authentication"
+          });
+        }
+        if (credentials.headerScheme === PamWebAppHeaderScheme.Custom) {
+          if (!credentials.headerName)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["headerName"],
+              message: "Header name is required for custom authentication"
+            });
+          if (!credentials.headerValue)
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["headerValue"],
+              message: "Header value is required for custom authentication"
+            });
+        }
+      }),
+    sanitizedCredentials: z.object({
+      authMethod: z.nativeEnum(PamWebAppAuthMethod),
+      headerScheme: z.nativeEnum(PamWebAppHeaderScheme).optional(),
+      username: z.string().optional(),
+      headerName: z.string().optional(),
+      recipe: WebAppFormLoginRecipeSchema.optional()
+    }),
+    ui: {
+      url: { label: "URL", tooltip: "The start page of the web app, opened in the remote browser." },
+      allowedHosts: {
+        label: "Allowed Hosts",
+        tooltip: "Hosts the remote browser may reach. Must include the URL's host. Defaults to the URL's host."
+      },
+      sslRejectUnauthorized: { label: "Reject Unauthorized" },
+      sslCertificate: { label: "SSL Certificate", widget: PamFieldWidget.Textarea },
+      authMethod: {
+        label: "Auth Method",
+        defaultValue: PamWebAppAuthMethod.None,
+        options: [
+          { label: "None", value: PamWebAppAuthMethod.None },
+          { label: "Header", value: PamWebAppAuthMethod.Header },
+          { label: "Form Login", value: PamWebAppAuthMethod.FormLogin }
+        ]
+      },
+      password: { widget: PamFieldWidget.Password, secret: true },
+      token: { widget: PamFieldWidget.Password, secret: true },
+      headerValue: { widget: PamFieldWidget.Password, secret: true }
+    }
   }
 } as const satisfies Partial<
   Record<
@@ -1130,6 +1278,12 @@ export const extractGatewayTarget = async (
       return { host: `${(validated as { account: string }).account}.snowflakecomputing.com`, port: 443 };
     case PamAccountType.AzureCli:
       return { host: "management.azure.com", port: 443 };
+    case PamAccountType.WebApp: {
+      const { url } = validated as { url: string };
+      const parsed = new URL(url);
+      const defaultPort = parsed.protocol === "http:" ? 80 : 443;
+      return { host: parsed.hostname, port: parsed.port ? Number(parsed.port) : defaultPort };
+    }
     default:
       throw new Error(`No gateway target extraction defined for account type '${accountType as PamAccountType}'`);
   }
@@ -1231,7 +1385,9 @@ export enum PamAccountAccessibilityIssue {
 }
 
 export const accountTypeRequiresRecording = (accountType: PamAccountType): boolean =>
-  accountType === PamAccountType.Windows || accountType === PamAccountType.WindowsAd;
+  accountType === PamAccountType.Windows ||
+  accountType === PamAccountType.WindowsAd ||
+  accountType === PamAccountType.WebApp;
 
 export const accountTypeRequiresGateway = (accountType: PamAccountType): boolean => {
   const config = ACCOUNT_TYPE_CONFIGS[accountType as TSupportedAccountType] as

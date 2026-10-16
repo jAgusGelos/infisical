@@ -140,7 +140,17 @@ import { pamSessionExpirationServiceFactory } from "@app/ee/services/pam-session
 import { pamSessionServiceFactory } from "@app/ee/services/pam-session/pam-session-service";
 import { pamSessionEventChunkDALFactory } from "@app/ee/services/pam-session-recording/pam-recording-chunk-dal";
 import { pamSessionChunkServiceFactory } from "@app/ee/services/pam-session-recording/pam-recording-chunk-service";
+import { resolvePamRecordingConfig } from "@app/ee/services/pam-session-recording/pam-recording-config-resolver";
+import { decryptSessionKey } from "@app/ee/services/pam-session-recording/pam-recording-secrets";
+import { PAM_RECORDING_STORAGE_FACTORY_MAP } from "@app/ee/services/pam-session-recording/pam-recording-storage-factory";
 import { pamWebAccessServiceFactory } from "@app/ee/services/pam-web-access/pam-web-access-service";
+import { pamWebAppCheckpointServiceFactory } from "@app/ee/services/pam-web-app/pam-web-app-checkpoint-service";
+import { pamWebAppObjectDALFactory, pamWebAppSessionKeyDALFactory } from "@app/ee/services/pam-web-app/pam-web-app-dal";
+import { pamWebAppManifestDALFactory } from "@app/ee/services/pam-web-app/pam-web-app-manifest-dal";
+import {
+  PAM_WEB_APP_MANIFEST_KEY_NAME,
+  pamWebAppManifestServiceFactory
+} from "@app/ee/services/pam-web-app/pam-web-app-manifest-service";
 import { permissionDALFactory } from "@app/ee/services/permission/permission-dal";
 import { permissionServiceFactory } from "@app/ee/services/permission/permission-service";
 import { pitServiceFactory } from "@app/ee/services/pit/pit-service";
@@ -231,7 +241,7 @@ import { getConfig, TEnvConfig } from "@app/lib/config/env";
 import { cronJobFactory } from "@app/lib/cron/cron-job";
 import { TLocalRefreshHandle } from "@app/lib/cron/local-refresh";
 import { crypto } from "@app/lib/crypto/cryptography";
-import { BadRequestError } from "@app/lib/errors";
+import { BadRequestError, NotFoundError } from "@app/lib/errors";
 import { initGatewayLoadTracker } from "@app/lib/gateway-v2/gateway-load-tracker";
 import { logger } from "@app/lib/logger";
 import { Redlock } from "@app/lib/red-lock";
@@ -2206,6 +2216,22 @@ export const registerRoutes = async (
   });
 
   const pamSessionEventChunkDAL = pamSessionEventChunkDALFactory(db);
+  const pamWebAppSessionKeyDAL = pamWebAppSessionKeyDALFactory(db);
+  const pamWebAppObjectDAL = pamWebAppObjectDALFactory(db);
+  const pamWebAppManifestDAL = pamWebAppManifestDALFactory(db);
+  const pamWebAppManifestService = pamWebAppManifestServiceFactory({
+    pamWebAppManifestDAL,
+    kmsService,
+    findManifestKeyId: async (projectId) => {
+      const key = await kmsDAL.findOne({ name: PAM_WEB_APP_MANIFEST_KEY_NAME, projectId, isReserved: true });
+      return key?.id ?? null;
+    },
+    getProjectOrgId: async (projectId) => {
+      const project = await projectDAL.findById(projectId);
+      if (!project) throw new NotFoundError({ message: `Project '${projectId}' not found` });
+      return project.orgId;
+    }
+  });
 
   // Wired after pamSessionDAL/gatewayV2Service: narrowing a member's access has to close the PAM
   // sessions that access was holding open.
@@ -4074,6 +4100,30 @@ export const registerRoutes = async (
     appConnectionDAL
   });
 
+  const pamWebAppCheckpointService = pamWebAppCheckpointServiceFactory({
+    pamSessionDAL,
+    pamWebAppSessionKeyDAL,
+    pamWebAppObjectDAL,
+    resolveStorage: async (accountId) => {
+      const config = await resolvePamRecordingConfig({ pamAccountDAL, appConnectionDAL, kmsService }, accountId);
+      return config ? { config, provider: PAM_RECORDING_STORAGE_FACTORY_MAP[config.backend]() } : null;
+    },
+    getSessionKey: async (session) => {
+      if (!session.encryptedSessionKey) {
+        throw new NotFoundError({ message: `Session '${session.id}' has no recording key yet` });
+      }
+      return decryptSessionKey({
+        projectId: session.projectId,
+        sessionId: session.id,
+        encryptedSessionKey: session.encryptedSessionKey,
+        kmsService
+      });
+    },
+    assertSessionViewAccess: pamSessionChunkService.checkSessionViewAccess,
+    pamWebAppManifestService,
+    pamAccountDAL
+  });
+
   const pamWebAccessService = pamWebAccessServiceFactory({
     pamAccountDAL,
     pamAccessRequestService,
@@ -4088,7 +4138,8 @@ export const registerRoutes = async (
     mfaSessionService,
     orgDAL,
     membershipDAL,
-    telemetryService
+    telemetryService,
+    keyStore
   });
 
   const certificateV3Service = certificateV3ServiceFactory({
@@ -4681,6 +4732,7 @@ export const registerRoutes = async (
     pamMembership: pamMembershipService,
     pamSession: pamSessionService,
     pamSessionChunk: pamSessionChunkService,
+    pamWebAppCheckpoint: pamWebAppCheckpointService,
     pamAccessRequest: pamAccessRequestService,
     pamWebAccess: pamWebAccessService,
     certManagerInstance: certManagerInstanceService,

@@ -11,6 +11,7 @@ import { enforceMfa } from "@app/ee/services/pam/pam-mfa";
 import { resolveAccessControls } from "@app/ee/services/pam/pam-policies";
 import { TPermissionServiceFactory } from "@app/ee/services/permission/permission-service-types";
 import { ResourcePermissionPamResourceActions } from "@app/ee/services/permission/resource-permission";
+import { KeyStorePrefixes, TKeyStoreFactory } from "@app/keystore/keystore";
 import { BadRequestError, ForbiddenRequestError, NotFoundError } from "@app/lib/errors";
 import { setupGatewayProxy, withGatewayV2Proxy } from "@app/lib/gateway-v2/gateway-v2";
 import { GatewayProxyProtocol } from "@app/lib/gateway-v2/types";
@@ -56,10 +57,22 @@ import {
   TSessionContext,
   TSessionHandlerResult,
   TWebSocketServerMessage,
+  WEB_APP_RECONNECT_GRACE_MS,
   WebSocketServerMessageSchema,
   WS_IDLE_TIMEOUT_MS,
   WS_PING_INTERVAL_MS
 } from "./pam-web-access-types";
+import {
+  decodeWebAppReconnectLease,
+  encodeWebAppReconnectLease,
+  getReconnectDecision,
+  TWebAppReconnectLease
+} from "./pam-web-app-reconnect";
+import {
+  sendWebAppErrorAndClose,
+  sendWebAppServerMessage,
+  sendWebAppSessionEndAndClose
+} from "./web-app/pam-web-app-control";
 
 type TPamWebAccessServiceFactoryDep = {
   pamAccountDAL: Pick<TPamAccountDALFactory, "findByIdWithDetails">;
@@ -70,6 +83,7 @@ type TPamWebAccessServiceFactoryDep = {
   pamSessionDAL: Pick<
     TPamSessionDALFactory,
     | "create"
+    | "findById"
     | "endSessionById"
     | "activateSession"
     | "countActiveWebSessions"
@@ -89,6 +103,7 @@ type TPamWebAccessServiceFactoryDep = {
   >;
   orgDAL: Pick<TOrgDALFactory, "findOrgById" | "findById">;
   telemetryService: Pick<TTelemetryServiceFactory, "sendPostHogEvents">;
+  keyStore: Pick<TKeyStoreFactory, "getItemPrimary" | "setItem" | "setItemWithExpiry" | "deleteItem">;
 };
 
 export type TPamWebAccessServiceFactory = ReturnType<typeof pamWebAccessServiceFactory>;
@@ -110,6 +125,22 @@ type THandleWebSocketConnectionDTO = {
   selectedHost?: string | null;
   preAuthMessages: TEarlyBufferedMsg[];
   preAuthHandler: (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => void;
+  rawSocket?: net.Socket;
+};
+
+// ws keeps the upgrade request's socket on a private field; used when the caller does not pass it.
+const getUnderlyingSocket = (socket: WebSocket): net.Socket | undefined => {
+  // eslint-disable-next-line no-underscore-dangle
+  const candidate = (socket as unknown as { _socket?: unknown })._socket;
+  return candidate instanceof net.Socket ? candidate : undefined;
+};
+
+const selectGatewayProtocol = (accountType: PamAccountType) => {
+  if (accountType === PamAccountType.Windows || accountType === PamAccountType.WindowsAd) {
+    return GatewayProxyProtocol.PamRdpBrowser;
+  }
+  if (accountType === PamAccountType.WebApp) return GatewayProxyProtocol.PamWebApp;
+  return GatewayProxyProtocol.Pam;
 };
 
 export const pamWebAccessServiceFactory = ({
@@ -126,8 +157,37 @@ export const pamWebAccessServiceFactory = ({
   mfaSessionService,
   orgDAL,
   membershipDAL,
-  telemetryService
+  telemetryService,
+  keyStore
 }: TPamWebAccessServiceFactoryDep) => {
+  const reconnectKey = (userId: string, accountId: string) => KeyStorePrefixes.PamWebAccessReconnect(userId, accountId);
+  const readReconnectState = async (userId: string, accountId: string): Promise<TWebAppReconnectLease | undefined> => {
+    const value = await keyStore.getItemPrimary(reconnectKey(userId, accountId));
+    if (!value) return undefined;
+    try {
+      const decoded = decodeWebAppReconnectLease(value);
+      if (!decoded) await keyStore.deleteItem(reconnectKey(userId, accountId));
+      return decoded;
+    } catch {
+      await keyStore.deleteItem(reconnectKey(userId, accountId));
+      return undefined;
+    }
+  };
+  const writeReconnectState = async (
+    userId: string,
+    accountId: string,
+    state: TWebAppReconnectLease,
+    expirySeconds?: number
+  ) => {
+    const key = reconnectKey(userId, accountId);
+    const value = encodeWebAppReconnectLease(state);
+    if (expirySeconds) await keyStore.setItemWithExpiry(key, expirySeconds, value);
+    else await keyStore.setItem(key, value);
+  };
+  const clearReconnectState = async (userId: string, accountId: string) => {
+    await keyStore.deleteItem(reconnectKey(userId, accountId));
+  };
+
   const decrypt = async (projectId: string, blob: Buffer): Promise<Record<string, unknown>> => {
     const { decryptor } = await kmsService.createCipherPairWithDataKey({ type: KmsDataKey.SecretManager, projectId });
     return JSON.parse(decryptor({ cipherTextBlob: blob }).toString("utf-8")) as Record<string, unknown>;
@@ -334,23 +394,47 @@ export const pamWebAccessServiceFactory = ({
     maxSessionDurationMs: policyDurationMs,
     selectedHost,
     preAuthMessages,
-    preAuthHandler
+    preAuthHandler,
+    rawSocket
   }: THandleWebSocketConnectionDTO): Promise<void> => {
     const earlyMessages: TEarlyBufferedMsg[] = preAuthMessages;
+    // Web App viewers only understand binary CONTROL frames, so every message below is routed by wire type.
+    let isWebAppWire = false;
+    let isOpeningTunnel = false;
+    const sendWireMessage = (message: TWebSocketServerMessage) => {
+      if (isWebAppWire) {
+        sendWebAppServerMessage(socket, message);
+        return;
+      }
+      sendMessage(socket, message);
+    };
+    const sendWireSessionEndAndClose = (reason: SessionEndReason) => {
+      if (isWebAppWire) {
+        sendWebAppSessionEndAndClose(socket, reason);
+        return;
+      }
+      sendSessionEndAndClose(socket, reason);
+    };
     const releaseEarlyBuffer = () => {
       socket.off("message", preAuthHandler);
     };
 
     let session: { id: string; accountId?: string | null } | null = null;
     let cleanedUp = false;
+    let cleaningUp = false;
+    let preservingForReconnect = false;
     let handlerResult: TSessionHandlerResult | null = null;
     let proxyServer: { port: number; cleanup: () => Promise<void> } | null = null;
     let sessionGatewayDetails: TGatewayV2ConnectionDetails | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let pingInterval: ReturnType<typeof setInterval> | null = null;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let viewerLostTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const cleanup = async () => {
+    const cleanup = async (preserveForReconnect = false, endReason = PamSessionEndReason.Completed) => {
+      if (cleanedUp || cleaningUp) return;
+      cleaningUp = true;
+      preservingForReconnect = preserveForReconnect;
       if (expiryTimer) {
         clearTimeout(expiryTimer);
         expiryTimer = null;
@@ -362,6 +446,10 @@ export const pamWebAccessServiceFactory = ({
       if (idleTimer) {
         clearTimeout(idleTimer);
         idleTimer = null;
+      }
+      if (viewerLostTimer) {
+        clearTimeout(viewerLostTimer);
+        viewerLostTimer = null;
       }
 
       if (handlerResult) {
@@ -384,7 +472,7 @@ export const pamWebAccessServiceFactory = ({
         }
       }
 
-      if (session) {
+      if (session && !preserveForReconnect) {
         const sessionId = session.id;
         try {
           const updated = await pamSessionDAL.endSessionById(sessionId);
@@ -395,14 +483,18 @@ export const pamWebAccessServiceFactory = ({
               projectId,
               event: {
                 type: EventType.PAM_SESSION_END,
-                metadata: { sessionId, accountId: session.accountId ?? undefined, accountName }
+                metadata: {
+                  sessionId,
+                  accountId: session.accountId ?? undefined,
+                  accountName
+                }
               }
             });
 
             void reportPamSessionEnded({
               session: updated,
               orgId,
-              endReason: PamSessionEndReason.Completed,
+              endReason,
               telemetryService,
               userDAL
             });
@@ -414,7 +506,7 @@ export const pamWebAccessServiceFactory = ({
         }
       }
 
-      if (sessionGatewayDetails) {
+      if (sessionGatewayDetails && !preserveForReconnect) {
         const details = sessionGatewayDetails;
         sessionGatewayDetails = null;
         void (async () => {
@@ -441,13 +533,61 @@ export const pamWebAccessServiceFactory = ({
         })();
       }
 
-      cleanedUp = true;
+      if (!preserveForReconnect) await clearReconnectState(userId, accountId);
+      if (!preserveForReconnect) cleanedUp = true;
+      cleaningUp = false;
+    };
+
+    const detachForReconnect = async () => {
+      if (!isWebAppWire || cleanedUp || cleaningUp || preservingForReconnect || !session) return;
+      await writeReconnectState(
+        userId,
+        accountId,
+        { sessionId: session.id, state: "grace" },
+        WEB_APP_RECONNECT_GRACE_MS / 1000
+      );
+      const detachedSessionId = session.id;
+      await cleanup(true);
+      viewerLostTimer = setTimeout(() => {
+        void (async () => {
+          const state = await readReconnectState(userId, accountId);
+          if (state?.sessionId !== detachedSessionId || state.state !== "grace") return;
+          await cleanup(false, PamSessionEndReason.ViewerLost);
+        })();
+      }, WEB_APP_RECONNECT_GRACE_MS);
     };
 
     try {
       const account = await pamAccountDAL.findByIdWithDetails(accountId);
       if (!account || account.projectId !== projectId) {
         throw new BadRequestError({ message: "Invalid account or project" });
+      }
+
+      isWebAppWire = account.accountType === PamAccountType.WebApp;
+
+      let reconnectSessionId: string | undefined;
+      let reconnectGatewayId: string | null | undefined;
+      if (isWebAppWire) {
+        const reconnectState = await readReconnectState(userId, accountId);
+        const reconnectSession = reconnectState ? await pamSessionDAL.findById(reconnectState.sessionId) : undefined;
+        const reconnectDecision = getReconnectDecision({
+          lease: reconnectState,
+          session: reconnectSession,
+          userId,
+          accountId
+        });
+        if (reconnectDecision === "session_in_use") {
+          sendWebAppErrorAndClose(socket, "session_in_use", "This Web App session already has an active viewer");
+          return;
+        }
+        if (reconnectDecision === "reattach") {
+          if (reconnectSession) {
+            reconnectSessionId = reconnectSession.id;
+            reconnectGatewayId = reconnectSession.gatewayId;
+          }
+        } else if (reconnectState) {
+          await clearReconnectState(userId, accountId);
+        }
       }
 
       const handlerEntry = SESSION_HANDLERS[account.accountType as PamAccountType];
@@ -471,43 +611,45 @@ export const pamWebAccessServiceFactory = ({
           projectId
         });
         if (!grant) {
-          sendMessage(socket, {
+          sendWireMessage({
             type: TerminalServerMessageType.Output,
             data: `${SessionEndReason.ApprovalRevoked}\n`
           });
-          sendSessionEndAndClose(socket, SessionEndReason.ApprovalRevoked);
+          sendWireSessionEndAndClose(SessionEndReason.ApprovalRevoked);
           return;
         }
         if (grant.expiresAt) {
           const grantRemainingMs = new Date(grant.expiresAt).getTime() - Date.now();
           if (grantRemainingMs <= 0) {
-            sendMessage(socket, {
+            sendWireMessage({
               type: TerminalServerMessageType.Output,
               data: `${SessionEndReason.ApprovalRevoked}\n`
             });
-            sendSessionEndAndClose(socket, SessionEndReason.ApprovalRevoked);
+            sendWireSessionEndAndClose(SessionEndReason.ApprovalRevoked);
             return;
           }
           sessionDurationCapMs = Math.min(sessionDurationCapMs, grantRemainingMs);
         }
       }
 
-      const effectiveGatewayId = await gatewayPoolService.resolveEffectiveGatewayId({
-        gatewayId: account.gatewayId ?? account.templateGatewayId,
-        gatewayPoolId: account.gatewayPoolId ?? account.templateGatewayPoolId
-      });
+      const effectiveGatewayId =
+        reconnectGatewayId ??
+        (await gatewayPoolService.resolveEffectiveGatewayId({
+          gatewayId: account.gatewayId ?? account.templateGatewayId,
+          gatewayPoolId: account.gatewayPoolId ?? account.templateGatewayPoolId
+        }));
       if (!effectiveGatewayId) {
         throw new BadRequestError({ message: "Gateway not configured for this account" });
       }
 
       await pamSessionDAL.endExpiredWebSessions(userId, projectId);
       const activeCount = await pamSessionDAL.countActiveWebSessions(userId, projectId);
-      if (activeCount >= MAX_WEB_SESSIONS_PER_USER) {
-        sendMessage(socket, {
+      if (!reconnectSessionId && activeCount >= MAX_WEB_SESSIONS_PER_USER) {
+        sendWireMessage({
           type: TerminalServerMessageType.Output,
           data: `${SessionEndReason.SessionLimitReached}\n`
         });
-        sendSessionEndAndClose(socket, SessionEndReason.SessionLimitReached);
+        sendWireSessionEndAndClose(SessionEndReason.SessionLimitReached);
         return;
       }
 
@@ -525,34 +667,46 @@ export const pamWebAccessServiceFactory = ({
       const sessionDurationMs = sessionDurationCapMs;
       const expiresAt = new Date(Date.now() + sessionDurationMs);
 
-      session = await pamSessionDAL.transaction(async (tx) => {
-        await assertUserStillActiveInOrg({ orgId, userId, membershipDAL, orgDAL, tx });
+      if (reconnectSessionId) {
+        const reconnectSession = await pamSessionDAL.findById(reconnectSessionId);
+        if (!reconnectSession) throw new BadRequestError({ message: "The Web App session is no longer available" });
+        session = reconnectSession;
+      } else {
+        session = await pamSessionDAL.transaction(async (tx) => {
+          await assertUserStillActiveInOrg({ orgId, userId, membershipDAL, orgDAL, tx });
 
-        return pamSessionDAL.create(
-          {
-            status: PamSessionStatus.Starting,
-            accessMethod: PamAccessMethod.Web,
-            expiresAt,
-            accountName,
-            accountType: account.accountType,
-            actorEmail,
-            actorIp,
-            actorName,
-            actorUserAgent,
-            projectId,
-            accountId: account.id,
-            userId,
-            gatewayId: effectiveGatewayId,
-            reason: accessReason?.trim() || null,
-            folderName: account.folderName,
-            selectedHost: targetHost
-          },
-          tx
-        );
-      });
+          return pamSessionDAL.create(
+            {
+              status: PamSessionStatus.Starting,
+              accessMethod: PamAccessMethod.Web,
+              expiresAt,
+              accountName,
+              accountType: account.accountType,
+              actorEmail,
+              actorIp,
+              actorName,
+              actorUserAgent,
+              projectId,
+              accountId: account.id,
+              userId,
+              gatewayId: effectiveGatewayId,
+              reason: accessReason?.trim() || null,
+              folderName: account.folderName,
+              selectedHost: targetHost
+            },
+            tx
+          );
+        });
+      }
+
+      if (isWebAppWire && session) {
+        await writeReconnectState(userId, accountId, { sessionId: session.id, state: "attached" });
+      }
 
       const createdSession = session;
       const isRdp = account.accountType === PamAccountType.Windows || account.accountType === PamAccountType.WindowsAd;
+      const gatewayProtocol = selectGatewayProtocol(account.accountType as PamAccountType);
+      isOpeningTunnel = true;
 
       // Certs are minted per gateway, so each attempt has to re-mint. `eager` opens the tunnel
       // during setup, so an unreachable gateway fails here where another member can still be tried.
@@ -585,7 +739,7 @@ export const pamWebAccessServiceFactory = ({
           return {
             gatewayDetails: attemptGatewayDetails,
             server: await setupGatewayProxy({
-              protocol: isRdp ? GatewayProxyProtocol.PamRdpBrowser : GatewayProxyProtocol.Pam,
+              protocol: gatewayProtocol,
               ...attemptGatewayDetails,
               longLived: true,
               eager: true
@@ -615,15 +769,17 @@ export const pamWebAccessServiceFactory = ({
 
       const isNearSessionExpiry = () => Date.now() >= expiresAt.getTime() - 30_000;
 
-      const boundSendMessage = (msg: TWebSocketServerMessage) => sendMessage(socket, msg);
+      const boundSendMessage = (msg: TWebSocketServerMessage) => sendWireMessage(msg);
       const boundSendSessionEnd = (reason: SessionEndReason) =>
-        sendMessage(socket, { type: TerminalServerMessageType.SessionEnd, reason });
+        sendWireMessage({ type: TerminalServerMessageType.SessionEnd, reason });
       const handlerCleanup = () => {
-        if (!cleanedUp) void cleanup();
+        if (isWebAppWire) void detachForReconnect();
+        else if (!cleanedUp) void cleanup();
       };
 
       const ctx: TSessionContext = {
         socket,
+        rawSocket: isWebAppWire ? (rawSocket ?? getUnderlyingSocket(socket)) : undefined,
         relayPort: proxyServer.port,
         resourceName: account.name,
         sessionId: session.id,
@@ -643,10 +799,11 @@ export const pamWebAccessServiceFactory = ({
       } finally {
         releaseEarlyBuffer();
       }
+      isOpeningTunnel = false;
 
-      // RDP sessions are activated by the gateway after credential exchange,
+      // RDP and Web App sessions are activated by the gateway when it fetches the session credentials,
       // not by the web access service.
-      if (!isRdp) {
+      if (!isRdp && !isWebAppWire) {
         await pamSessionDAL.activateSession(session.id);
       }
 
@@ -673,7 +830,7 @@ export const pamWebAccessServiceFactory = ({
         idleTimer = setTimeout(() => {
           if (!cleanedUp) {
             void cleanup();
-            sendSessionEndAndClose(socket, SessionEndReason.IdleTimeout);
+            sendWireSessionEndAndClose(SessionEndReason.IdleTimeout);
           }
         }, WS_IDLE_TIMEOUT_MS);
       };
@@ -702,7 +859,7 @@ export const pamWebAccessServiceFactory = ({
           try {
             if (!(await pamSessionDAL.isSessionTerminated(sessionId)) || cleanedUp) return;
             await cleanup();
-            sendSessionEndAndClose(socket, SessionEndReason.Terminated);
+            sendWireSessionEndAndClose(SessionEndReason.Terminated);
           } catch (err) {
             logger.error(err, `Failed to check session termination [sessionId=${sessionId}]`);
           }
@@ -716,22 +873,28 @@ export const pamWebAccessServiceFactory = ({
       expiryTimer = setTimeout(() => {
         if (!cleanedUp) {
           void cleanup();
-          sendSessionEndAndClose(socket, SessionEndReason.SessionCompleted);
+          sendWireSessionEndAndClose(SessionEndReason.SessionCompleted);
         }
       }, sessionDurationMs);
 
       socket.on("close", () => {
         logger.info({ accountId, sessionId: session?.id }, "WebSocket connection closed");
-        void cleanup();
+        if (isWebAppWire) void detachForReconnect();
+        else void cleanup();
       });
 
       socket.on("error", (err: Error) => {
         logger.error(err, "WebSocket error");
-        void cleanup();
+        if (isWebAppWire) void detachForReconnect();
+        else void cleanup();
       });
     } catch (err) {
       logger.error(err, "Failed to establish web access session");
       await cleanup();
+      if (isWebAppWire) {
+        sendWebAppErrorAndClose(socket, isOpeningTunnel ? "tunnel_failed" : "internal", SessionEndReason.SetupFailed);
+        return;
+      }
       sendSessionEndAndClose(socket, SessionEndReason.SetupFailed);
     }
   };

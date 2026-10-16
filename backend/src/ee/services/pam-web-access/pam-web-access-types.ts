@@ -1,3 +1,5 @@
+import type { Socket } from "node:net";
+
 import type WebSocket from "ws";
 import { z } from "zod";
 
@@ -40,11 +42,14 @@ export const DEFAULT_WEB_SESSION_DURATION_MS = 60 * 60 * 1000;
 export const MAX_WEB_SESSIONS_PER_USER = 5;
 export const WS_PING_INTERVAL_MS = 30000;
 export const WS_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+export const WEB_APP_RECONNECT_GRACE_MS = 60 * 1000;
 
 export type TEarlyBufferedMsg = { data: Buffer; isBinary: boolean };
 
 export type TSessionContext = {
   socket: WebSocket;
+  // The upgrade request's socket under `socket`, paused for upstream backpressure (Web App sessions).
+  rawSocket?: Socket;
   relayPort: number;
   resourceName: string;
   sessionId: string;

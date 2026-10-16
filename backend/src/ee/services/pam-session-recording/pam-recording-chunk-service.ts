@@ -5,28 +5,21 @@ import { BadRequestError, ForbiddenRequestError, NotFoundError } from "@app/lib/
 import { logger } from "@app/lib/logger";
 import { OrgServiceActor } from "@app/lib/types";
 import { TAppConnectionDALFactory } from "@app/services/app-connection/app-connection-dal";
-import { AWSRegion } from "@app/services/app-connection/app-connection-enums";
-import { decryptAppConnection } from "@app/services/app-connection/app-connection-fns";
-import { getAwsConnectionConfig } from "@app/services/app-connection/aws/aws-connection-fns";
-import { TAwsConnectionConfig } from "@app/services/app-connection/aws/aws-connection-types";
 import { ActorType } from "@app/services/auth/auth-type";
 import { TKmsServiceFactory } from "@app/services/kms/kms-service";
 
 import { PamProductRole, PamSessionStatus } from "../pam/pam-enums";
 import { checkAccountAccess, TActorContext, verifyProductMembership } from "../pam/pam-permission";
 import { TPamAccountDALFactory } from "../pam-account/pam-account-dal";
-import {
-  PamRecordingS3ConfigSchema,
-  PamTemplateSettingsSchema
-} from "../pam-account-template/pam-account-template-schemas";
 import { TPamSessionDALFactory } from "../pam-session/pam-session-dal";
 import { ResourcePermissionPamResourceActions } from "../permission/resource-permission";
 import { TPamSessionEventChunkDALFactory } from "./pam-recording-chunk-dal";
+import { resolvePamRecordingConfig } from "./pam-recording-config-resolver";
 import { PAM_RECORDING_MAX_CHUNK_BYTES } from "./pam-recording-constants";
 import { PamRecordingStorageBackend } from "./pam-recording-enums";
 import { decryptSessionKey, verifyGatewayUploadToken } from "./pam-recording-secrets";
 import { PAM_RECORDING_STORAGE_FACTORY_MAP } from "./pam-recording-storage-factory";
-import { buildExternalChunkObjectKey, TPamRecordingResolvedConfig } from "./pam-recording-storage-types";
+import { buildExternalChunkObjectKey } from "./pam-recording-storage-types";
 
 type TPamSessionChunkServiceFactoryDep = {
   pamSessionDAL: TPamSessionDALFactory;
@@ -53,52 +46,9 @@ export const pamSessionChunkServiceFactory = ({
   kmsService,
   appConnectionDAL
 }: TPamSessionChunkServiceFactoryDep) => {
-  const resolveRecordingConfig = async (accountId: string): Promise<TPamRecordingResolvedConfig | null> => {
-    const account = await pamAccountDAL.findByIdWithDetails(accountId);
-    if (!account) return null;
+  const resolveRecordingConfig = (accountId: string) =>
+    resolvePamRecordingConfig({ pamAccountDAL, appConnectionDAL, kmsService }, accountId);
 
-    const templateParsed = account.templateSettings
-      ? PamTemplateSettingsSchema.safeParse(account.templateSettings)
-      : null;
-    const templateSettings = templateParsed?.success ? templateParsed.data : null;
-    if (!templateSettings) return null;
-
-    const accountS3Parsed = account.settingsOverrides
-      ? PamRecordingS3ConfigSchema.safeParse((account.settingsOverrides as Record<string, unknown>).recordingS3Config)
-      : null;
-    const accountS3 = accountS3Parsed?.success ? accountS3Parsed.data : null;
-
-    if (templateSettings.recordingStorageBackend === PamRecordingStorageBackend.AwsS3) {
-      const connectionId = account.recordingConnectionId ?? account.templateRecordingConnectionId;
-      const s3Config = accountS3 ?? templateSettings.recordingS3Config;
-      if (!connectionId || !s3Config) return null;
-
-      const raw = await appConnectionDAL.findById(connectionId);
-      if (!raw) {
-        logger.warn({ connectionId, accountId }, `Recording app connection not found [connectionId=${connectionId}]`);
-        return null;
-      }
-
-      const appConnection = await decryptAppConnection(raw, kmsService);
-      const awsConfig = await getAwsConnectionConfig(
-        appConnection as unknown as TAwsConnectionConfig,
-        (s3Config.region as AWSRegion) ?? AWSRegion.US_EAST_1
-      );
-
-      return {
-        backend: PamRecordingStorageBackend.AwsS3,
-        bucket: s3Config.bucket,
-        region: s3Config.region as AWSRegion,
-        keyPrefix: s3Config.keyPrefix ?? null,
-        awsCredentials: awsConfig.credentials
-      };
-    }
-
-    return {
-      backend: PamRecordingStorageBackend.Postgres,
-      keyPrefix: null
-    };
-  };
   const checkSessionViewAccess = async (
     session: { accountId?: string | null; projectId: string },
     actor: OrgServiceActor
@@ -386,5 +336,5 @@ export const pamSessionChunkServiceFactory = ({
     return { ciphertext: chunk.encryptedEventsBlob };
   };
 
-  return { requestPresignedPut, recordChunk, getSessionPlayback, getChunkCiphertext };
+  return { requestPresignedPut, recordChunk, getSessionPlayback, getChunkCiphertext, checkSessionViewAccess };
 };

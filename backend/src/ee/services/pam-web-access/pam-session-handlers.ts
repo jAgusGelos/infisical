@@ -8,6 +8,7 @@ import { handleRdpSession } from "./rdp/pam-rdp-session-handler";
 import { handleRedisSession } from "./redis/pam-redis-session-handler";
 import { handleSnowflakeSession } from "./snowflake/pam-snowflake-session-handler";
 import { handleSSHSession } from "./ssh/pam-ssh-session-handler";
+import { handleWebAppSession } from "./web-app/pam-web-app-session-handler";
 
 export type TWebAccessHandler = (
   ctx: TSessionContext,
@@ -52,5 +53,9 @@ export const SESSION_HANDLERS: Partial<Record<PamAccountType, TSessionHandlerEnt
   [PamAccountType.WindowsAd]: {
     gatewayAccountType: PamAccountType.Windows,
     handler: handleRdpSession
+  },
+  [PamAccountType.WebApp]: {
+    gatewayAccountType: PamAccountType.WebApp,
+    handler: handleWebAppSession
   }
 };
