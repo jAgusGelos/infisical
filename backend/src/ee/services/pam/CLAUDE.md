@@ -127,7 +127,9 @@ Gateway-routed types run through one RPC — `testConnectionWithGateway` → the
 (`packages/gateway-v2/test_connection_handler.go`), dispatched on `mode`: `sql` (postgres/mysql/mssql auth), `mongodb`,
 `ldap` (Windows AD, against `dcAddress`), `kubernetes` (token), `ssh`, or `tcp` (reachability — the ceiling for
 Windows RDP, SSH cert auth, MsSQL NTLM/Kerberos, and K8s gateway-auth). A null test result (gateway offline / missing
-the connection-test protocol) skips rather than blocks.
+the connection-test protocol) skips rather than blocks. `web-app` (URL GET through the gateway) goes through
+`runGatewayConnectionTest`, which maps its `{ok, step, httpStatus, message}` answer and, on account create/update,
+falls back to `tcp` when the gateway does not answer that mode.
 
 Cloud types use one of two brokering models instead of a plain gateway TCP proxy: **gateway-less** (`AwsIam`,
 `requiresGateway: false`) mints short-lived STS credentials in `access()` and returns them in session

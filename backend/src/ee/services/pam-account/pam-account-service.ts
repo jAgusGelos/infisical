@@ -71,6 +71,8 @@ import { terminatePamSessions } from "../pam-session/pam-session-fns";
 import {
   buildGatewayConnectionTest,
   CLOUD_CONNECTION_VALIDATORS,
+  runGatewayConnectionTest,
+  TestConnectionMode,
   testVerifiesCredential
 } from "./pam-account-connection-test";
 import { TPamAccountDALFactory } from "./pam-account-dal";
@@ -654,14 +656,20 @@ export const pamAccountServiceFactory = (deps: TPamAccountServiceFactoryDep) => 
     const test = await buildGatewayConnectionTest(accountType, connectionDetails, credentials, orgId);
     if (!test) return false;
 
-    const result = await testBuiltConnectionWithGateway(test, gatewayId, gatewayV2Service, CONNECTION_TEST_TIMEOUT_MS);
+    const { result, request } = await runGatewayConnectionTest(
+      test,
+      (built) => testBuiltConnectionWithGateway(built, gatewayId, gatewayV2Service, CONNECTION_TEST_TIMEOUT_MS),
+      { fallbackToTcp: true }
+    );
 
     // a null result means the gateway couldn't be reached (offline / pre-protocol) — skip rather than block
     if (result && !result.ok) {
       throw new BadRequestError({ message: `Connection test failed: ${result.errorMessage}` });
     }
 
-    return Boolean(result?.ok) && testVerifiesCredential(test.request);
+    const connectionSucceeded = Boolean(result?.ok);
+    const webAppProbe = test.request.mode === TestConnectionMode.WebApp;
+    return connectionSucceeded && (webAppProbe || testVerifiesCredential(request));
   };
 
   const create = async ({

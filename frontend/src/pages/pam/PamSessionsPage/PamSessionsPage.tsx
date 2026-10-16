@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Helmet } from "react-helmet";
 import { useTranslation } from "react-i18next";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { format } from "date-fns";
 import { Activity, Ban, SearchIcon, Video } from "lucide-react";
 
@@ -145,6 +145,8 @@ const FolderNameCell = ({ session, search }: { session: TPamSession; search: str
 export const PamSessionsPage = () => {
   const { t } = useTranslation();
   const { currentProject } = useProject();
+  const { currentOrg } = useOrganization();
+  const navigate = useNavigate();
   const { map: accountTypeMap } = usePamAccountTypeMap();
 
   const [search, setSearch] = useState("");
@@ -296,7 +298,17 @@ export const PamSessionsPage = () => {
                   session.accountType && accountTypeMap[session.accountType as PamAccountType];
 
                 return (
-                  <TableRow key={session.id} onClick={() => sessionSheet.openSheet(session.id)}>
+                  <TableRow
+                    key={session.id}
+                    onClick={() =>
+                      session.accountType === PamAccountType.WebApp
+                        ? navigate({
+                            to: "/organizations/$orgId/pam/sessions/$sessionId",
+                            params: { orgId: currentOrg.id, sessionId: session.id }
+                          })
+                        : sessionSheet.openSheet(session.id)
+                    }
+                  >
                     <TableCell className="h-[50px]">
                       <div className="flex flex-col">
                         <span className="text-sm">

@@ -22,11 +22,32 @@ export const DEFAULT_HEARTBEAT_CONFIG: TPamHeartbeatConfig = { enabled: true, in
 export const PamRecordingS3ConfigSchema = z.object({
   bucket: z.string().trim().min(1),
   region: z.nativeEnum(AWSRegion),
-  keyPrefix: z.string().trim().optional()
+  keyPrefix: z.string().trim().optional(),
+  // S3-compatible endpoint (for example MinIO); unset means the AWS regional endpoint
+  endpoint: z.string().trim().url().max(2048).optional(),
+  forcePathStyle: z.boolean().optional()
 });
 
 export const PamAccountSettingsOverridesSchema = z.object({
   recordingS3Config: PamRecordingS3ConfigSchema.optional()
+});
+
+export const PamWebAppTemplateSettingsSchema = z.object({
+  requireObjectLock: z.boolean().default(true),
+  onRecorderOverflow: z.enum(["terminate", "continue_with_loss"]).default("continue_with_loss"),
+  maskedSelectors: z.array(z.string().max(512)).max(50).default([]),
+  maskedHeaders: z.array(z.string().toLowerCase().max(256)).max(50).default([]),
+  maskedQueryParams: z.array(z.string().max(256)).max(50).default([]),
+  bodyCapBytes: z.number().int().min(0).max(1048576).default(65536),
+  retentionDays: z.number().int().min(1).max(3650).default(30),
+  clipboard: z.enum(["off", "to_remote", "from_remote", "both"]).default("off"),
+  downloads: z.enum(["block", "quarantine", "allow"]).default("quarantine"),
+  uploads: z.enum(["block", "allow"]).default("block"),
+  idleTimeoutMinutes: z.number().int().min(1).max(240).default(15),
+  liveCodecs: z
+    .array(z.enum(["vp9", "h264"]))
+    .min(1)
+    .default(["vp9", "h264"])
 });
 
 export const PamTemplateSettingsSchema = z.object({
@@ -37,13 +58,40 @@ export const PamTemplateSettingsSchema = z.object({
   rotation: PamRotationConfigSchema.optional(),
   heartbeat: PamHeartbeatConfigSchema.optional(),
   sessionLogMaskingPatterns: z.string().optional(),
-  sessionLogMaskingBuiltInDetection: z.boolean().default(false)
+  sessionLogMaskingBuiltInDetection: z.boolean().default(false),
+  webApp: PamWebAppTemplateSettingsSchema.optional()
 });
+
+type TWebAppInvariantInput = {
+  recordingEnabled?: boolean;
+  recordingStorageBackend?: PamRecordingStorageBackend;
+  webApp?: { requireObjectLock?: boolean } | null;
+};
+
+// Web App recording is the evidence, so a template that configures Web App must record, and Object
+// Lock needs S3 (CONTRACTS 8.3).
+export const addWebAppTemplateIssues = (settings: TWebAppInvariantInput, ctx: z.RefinementCtx) => {
+  if (!settings.webApp) return;
+  if (settings.recordingEnabled === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["recordingEnabled"],
+      message: "Recording must be enabled for templates with Web App settings"
+    });
+  }
+  if (settings.recordingStorageBackend !== PamRecordingStorageBackend.AwsS3) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["recordingStorageBackend"],
+      message: "Web App recordings with Object Lock must be stored in AWS S3 (or an S3-compatible endpoint)"
+    });
+  }
+};
 
 export const PamTemplateSettingsInputSchema = PamTemplateSettingsSchema.extend({
   sessionLogMaskingPatterns: patternsStringSchema().optional(),
   sessionLogMaskingBuiltInDetection: z.boolean().optional()
-});
+}).superRefine(addWebAppTemplateIssues);
 
 export type TPamTemplateSettings = z.infer<typeof PamTemplateSettingsSchema>;
 export type TPamTemplateSettingsInput = z.infer<typeof PamTemplateSettingsInputSchema>;

@@ -136,7 +136,7 @@ export const validateRecordingConnection = async (
 export const validateRecordingS3Config = async (
   deps: Pick<TPamValidatorDeps, "permissionService" | "appConnectionDAL" | "kmsService">,
   connectionId: string,
-  s3Config: { bucket: string; region: string; keyPrefix?: string },
+  s3Config: { bucket: string; region: string; keyPrefix?: string; endpoint?: string; forcePathStyle?: boolean },
   ctx: TActorContext
 ): Promise<TPamRecordingResolvedConfig> => {
   const raw = await enforceAppConnectionConnect(deps, connectionId, ctx);
@@ -152,6 +152,8 @@ export const validateRecordingS3Config = async (
     bucket: s3Config.bucket,
     region: s3Config.region as AWSRegion,
     keyPrefix: s3Config.keyPrefix ?? null,
+    endpoint: s3Config.endpoint,
+    forcePathStyle: s3Config.forcePathStyle,
     awsCredentials: awsConfig.credentials
   };
 

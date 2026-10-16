@@ -3,9 +3,10 @@ import { postGatewayRpc } from "./gateway-rpc";
 // Older gateways send no kind, which the caller must treat as unclassified rather than as either outcome.
 export type GatewayFailureKind = "auth" | "transport" | "unknown";
 
+// payload is the parsed response body, for modes whose answer carries more than the HTTP status
 export type TestConnectionResponse =
-  | { ok: true; status: number }
-  | { ok: false; status: number; errorMessage: string; kind: GatewayFailureKind | null };
+  | { ok: true; status: number; payload?: unknown }
+  | { ok: false; status: number; errorMessage: string; kind: GatewayFailureKind | null; payload?: unknown };
 
 export const TEST_CONNECTION_RPC_TIMEOUT_MS = 60_000;
 
@@ -28,19 +29,22 @@ export const callTestConnection = async (args: {
     label: "Test connection"
   });
 
-  if (status >= 200 && status < 300) return { ok: true, status };
-
-  const errEnv = (() => {
+  const payload = (() => {
     try {
-      return (JSON.parse(text) as { error?: { message?: string; kind?: GatewayFailureKind } }).error;
+      return JSON.parse(text) as unknown;
     } catch {
       return undefined;
     }
   })();
+
+  if (status >= 200 && status < 300) return { ok: true, status, payload };
+
+  const errEnv = (payload as { error?: { message?: string; kind?: GatewayFailureKind } } | undefined)?.error;
   return {
     ok: false,
     status,
     errorMessage: errEnv?.message ?? `Gateway returned HTTP ${status}`,
-    kind: errEnv?.kind ?? null
+    kind: errEnv?.kind ?? null,
+    payload
   };
 };

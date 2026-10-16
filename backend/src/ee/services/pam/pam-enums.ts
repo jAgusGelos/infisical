@@ -13,7 +13,8 @@ export enum PamAccountType {
   GcpServiceAccount = "gcp-service-account",
   AzureCli = "azure-cli",
   Windows = "windows",
-  WindowsAd = "windows-ad"
+  WindowsAd = "windows-ad",
+  WebApp = "web-app"
 }
 
 export enum PamResourceRole {
@@ -50,7 +51,8 @@ export enum PamSessionStatus {
 
 export enum PamSessionEndReason {
   Completed = "completed",
-  Expired = "expired"
+  Expired = "expired",
+  ViewerLost = "viewer_lost"
 }
 
 export enum PamSnowflakeAuthMethod {
@@ -78,6 +80,18 @@ export enum PamSshAuthMethod {
 export enum PamPostgresAuthMethod {
   Password = "password",
   AwsIam = "aws-iam"
+}
+
+export enum PamWebAppAuthMethod {
+  None = "none",
+  Header = "header",
+  FormLogin = "form-login"
+}
+
+export enum PamWebAppHeaderScheme {
+  Basic = "basic",
+  Bearer = "bearer",
+  Custom = "custom"
 }
 
 export enum PamAccessType {
